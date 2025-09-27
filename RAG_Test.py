@@ -264,60 +264,59 @@ def ollama_analyze(texts: List[str], retries=3, delay=1.5) -> str:
 # ---------- 主程式 ----------
 def main():
     global STOP
-    print(f"[info] 設定：tokens='{TOKENS_COLLECTION}', news='{NEWS_COLLECTION}', threshold={SCORE_THRESHOLD}")
+    output_file = "result.txt"
+    with open(output_file, "w", encoding="utf-8") as f:
 
-    db = get_db()
-    pos, neg = load_tokens(db, TOKENS_COLLECTION)
-    pos_c = compile_tokens(pos)
-    neg_c = compile_tokens(neg)
+        def out(msg):
+            print(msg)
+            f.write(msg + "\n")
 
-    items = load_news_items(db, NEWS_COLLECTION, LOOKBACK_DAYS)
-    if not items:
-        print("[info] NEWS 無資料可分析。")
-        return
+        out(f"[info] 設定：tokens='{TOKENS_COLLECTION}', news='{NEWS_COLLECTION}', threshold={SCORE_THRESHOLD}")
 
-    filtered: List[Tuple[Dict, MatchResult]] = []
-    for item in items:
-        if STOP: break
-        text_for_scoring = item["content"] or item["title"]
-        res = score_text(text_for_scoring, pos_c, neg_c)
-        if abs(res.score) >= SCORE_THRESHOLD:
-            filtered.append((item, res))
+        db = get_db()
+        pos, neg = load_tokens(db, TOKENS_COLLECTION)
+        pos_c = compile_tokens(pos)
+        neg_c = compile_tokens(neg)
 
-    print(f"[info] 過濾後新聞: {len(filtered)} / {len(items)}")
-    if not filtered or STOP:
-        print("[info] 無新聞達到閾值或已中斷，結束")
-        return
+        items = load_news_items(db, NEWS_COLLECTION, LOOKBACK_DAYS)
+        if not items:
+            out("[info] NEWS 無資料可分析。")
+            return
 
-    vectors = [embed_text(n[0]["content"] or n[0]["title"]) for n in filtered]
-    index, news_list = build_faiss_index(vectors, [n[0] for n in filtered])
+        filtered: List[Tuple[Dict, MatchResult]] = []
+        for item in items:
+            if STOP: break
+            text_for_scoring = item["content"] or item["title"]
+            res = score_text(text_for_scoring, pos_c, neg_c)
+            if abs(res.score) >= SCORE_THRESHOLD:
+                filtered.append((item, res))
 
-    for item, res in filtered:
-        short_title = item["title"] if item["title"] else item["content"]
-        print(f"\n[{item['id']}] {short_title}")
-        if res.score >= SCORE_THRESHOLD:
-            print("✅ 明日可能大漲")
-        elif res.score <= -SCORE_THRESHOLD:
-            print("⚠️ 明日可能大跌")
-        else:
-            print("—")
-        if res.hits:
-            print("命中：")
-            print_token_hits(res.hits)
+        out(f"[info] 過濾後新聞: {len(filtered)} / {len(items)}")
+        if not filtered or STOP:
+            out("[info] 無新聞達到閾值或已中斷，結束")
+            return
 
-    similar_idxs = retrieve_similar_news(index, vectors, top_k=3)
-    rag_texts = []
-    for i, idxs in enumerate(similar_idxs):
-        texts = [filtered[i][0]["content"] or filtered[i][0]["title"]]
-        for j in idxs:
-            if j != i and j < len(filtered):
-                texts.append(filtered[j][0]["content"] or filtered[j][0]["title"])
-        rag_texts.append("\n".join(texts))
+        # 以下可以照原本程式 print 改成 out
+        for item, res in filtered:
+            short_title = item["title"] if item["title"] else item["content"]
+            out(f"\n[{item['id']}] {short_title}")
+            if res.score >= SCORE_THRESHOLD:
+                out("✅ 明日可能大漲")
+            elif res.score <= -SCORE_THRESHOLD:
+                out("⚠️ 明日可能大跌")
+            else:
+                out("—")
+            if res.hits:
+                out("命中：")
+                for patt, w, note in res.hits:
+                    why = f"（{note}）" if note else ""
+                    out(f"  {'+' if w>0 else '-'} {patt} {why}")
 
-    # Ollama 分析輸出純文字
-    print("\n--- Ollama 生成分析 ---")
-    summary = ollama_analyze(rag_texts)
-    print(summary)
+        # Ollama 分析
+        summary = ollama_analyze([n[0]["content"] or n[0]["title"] for n in filtered])
+        out("\n--- Ollama 生成分析 ---")
+        out(summary)
+
 
 if __name__ == "__main__":
     main()
