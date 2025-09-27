@@ -34,7 +34,7 @@ jobs:
         env:
           GROQ_API_KEY: ${{secrets.GROQ_API_KEY}}
         run: |
-          uv run python RAG_Test.py > result.txt 2>&1
+          uv run python RAG_Test.py > result.txt 
           # ↑ 把程式輸出存到 result.txt (包含錯誤)
 
       - name: Upload result as artifact
