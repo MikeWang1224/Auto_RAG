@@ -3,24 +3,24 @@ name: Run Program on Push
 on:
   push:
     branches:
-      - main  # 你想要觸發的分支，可以修改為 master 或其他分支
+      - main  # push 到 main 分支時觸發
 
   schedule:
     - cron: '01 21 * * *'  # 台灣時間 05:01（UTC 20:01）
-    - cron: '11 6 * * *'  # 每天下午2點11分觸發
+    - cron: '11 6 * * *'   # 每天下午2點11分觸發
 
 jobs:
   run_program:
-    runs-on: ubuntu-latest  # 使用的操作系統，可以選擇 ubuntu、windows 或 macos
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # 檢出代碼
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'  # 設定 Python 版本
+          python-version: '3.11'
 
       - name: install uv
         run: |
@@ -28,10 +28,17 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync
+          uv pip install -r requirements.txt
 
       - name: Run your program
         env:
           GROQ_API_KEY: ${{secrets.GROQ_API_KEY}}
         run: |
-          uv run python RAG_Test.py  # 執行你的程式
+          uv run python RAG_Test.py > result.txt 2>&1
+          # ↑ 把程式輸出存到 result.txt (包含錯誤)
+
+      - name: Upload result as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-output
+          path: result.txt
