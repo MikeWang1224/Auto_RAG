@@ -27,9 +27,8 @@ jobs:
 
       - name: Set Google credentials
         run: |
-          echo "${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_B64 }}" | base64 --decode > $GITHUB_WORKSPACE/gcp-key.json
+          echo "${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_B64 }}" | base64 -d -w 0 > $GITHUB_WORKSPACE/gcp-key.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/gcp-key.json" >> $GITHUB_ENV
-
 
 
       - name: Run Program and save output
