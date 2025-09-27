@@ -5,9 +5,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '01 21 * * *'
-    - cron: '11 6 * * *'
- 
+    - cron: '0 9 * * *' 
 jobs:
   run_program:
     runs-on: ubuntu-latest
