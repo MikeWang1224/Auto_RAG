@@ -36,3 +36,10 @@ jobs:
         run: |
           python RAG_Test.py > result.txt
           cat result.txt
+
+      - name: Upload result as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-result
+          path: result.txt
+
