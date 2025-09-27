@@ -33,6 +33,8 @@ jobs:
       - name: Run your program
         env:
           GROQ_API_KEY: ${{secrets.GROQ_API_KEY}}
+          FifeBase: ${{secrets.FireBase}}
+    
         run: |
           uv run python RAG_Test.py > result.txt 
           # ↑ 把程式輸出存到 result.txt (包含錯誤)
