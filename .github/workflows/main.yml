@@ -33,7 +33,7 @@ jobs:
       - name: Run your program
         env:
           GROQ_API_KEY: ${{secrets.GROQ_API_KEY}}
-          FifeBase: ${{secrets.FireBase}}
+          FIREBASE: ${{secrets.FIREBASE}}
     
         run: |
           uv run python RAG_Test.py > result.txt 
