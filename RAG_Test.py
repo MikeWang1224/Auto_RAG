@@ -196,7 +196,7 @@ def build_faiss_index(vectors: List[np.ndarray], news_items: List[Dict]):
     index.add(vec_matrix)
     return index, news_items
 
-# ---------- Ollama 分析 ----------
+# ---------- Groq 分析 ----------
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 def prepare_news_for_llm(news_items: List[str]) -> str:
@@ -312,9 +312,9 @@ def main():
                     why = f"（{note}）" if note else ""
                     out(f"  {'+' if w>0 else '-'} {patt} {why}")
 
-        # Ollama 分析
+        # Groq 分析
         summary = ollama_analyze([n[0]["content"] or n[0]["title"] for n in filtered])
-        out("\n--- Ollama 生成分析 ---")
+        out("\n--- Groq 生成分析 ---")
         out(summary)
 
 
