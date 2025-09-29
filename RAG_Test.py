@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-股票新聞分析工具（完整 RAG 版 + 全文打分 + Ollama 分析 + Token 傾向顯示）
+股票新聞分析工具（完整 RAG 版 + 全文打分 + Groq 分析 + Token 傾向顯示）
 """
 
 import os
@@ -264,7 +264,8 @@ def ollama_analyze(texts: List[str], retries=3, delay=1.5) -> str:
 # ---------- 主程式 ----------
 def main():
     global STOP
-    output_file = "result.txt"
+    today = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
+    output_file = f"result_{today}.txt"
     with open(output_file, "w", encoding="utf-8") as f:
 
         def out(msg):
