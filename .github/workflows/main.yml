@@ -32,12 +32,13 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
-          python RAG_Test.py > result.txt
-          cat result.txt
+          today=$(date +'%Y%m%d')
+          python RAG_Test.py > result_${today}.txt
+          cat result_${today}.txt
+          echo "TODAY=$today" >> $GITHUB_ENV   # 存到環境變數，後面可以用
 
       - name: Upload result as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rag-result-$(date +'%Y%m%d')
-          path: result.txt
-
+          name: rag-result-${{ env.TODAY }}
+          path: result_*.txt
