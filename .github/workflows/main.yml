@@ -1,18 +1,25 @@
-name: Run Program on Push
+name: Run RAG Program and Save Result
 
 on:
   push:
     branches:
       - main
   schedule:
-    - cron: '0 9 * * *' 
+    - cron: '0 9 * * *'  # 每天台灣時間下午5點執行
+  workflow_dispatch:      # 支援手動觸發
+
+permissions:
+  contents: write   # 🔥 這行很關鍵，允許 push 回 repo
+
 jobs:
   run_program:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true   # ✅ 允許後續 git push 使用 GITHUB_TOKEN
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -20,25 +27,28 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Set Google credentials
         run: |
           echo "${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_B64 }}" | base64 -d > $GITHUB_WORKSPACE/gcp-key.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/gcp-key.json" >> $GITHUB_ENV
 
-      - name: Run Program and save output
+      - name: Run RAG_Test.py and save result
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
+          mkdir -p results
           today=$(date +'%Y%m%d')
-          python RAG_Test.py > result_${today}.txt
-          cat result_${today}.txt
-          echo "TODAY=$today" >> $GITHUB_ENV   # 存到環境變數，後面可以用
+          python RAG_Test.py > results/result_${today}.txt
+          cat results/result_${today}.txt
+          echo "TODAY=$today" >> $GITHUB_ENV
 
-      - name: Upload result as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rag-result-${{ env.TODAY }}
-          path: result_*.txt
+      - name: Commit and push result back to repo
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add results/result_${TODAY}.txt
+          git commit -m "Auto: Add result_${TODAY}.txt" || echo "No changes to commit"
+          git push origin main
