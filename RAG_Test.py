@@ -4,6 +4,7 @@
 每天各自產出一份 Groq 結果，分別存入：
 - Groq_result
 - Groq_result_Foxxcon
+同時在本地 result 資料夾保存完整分析紀錄。
 """
 
 import os, signal, time, regex as re
@@ -157,19 +158,11 @@ def ollama_analyze(texts: List[str], target: str) -> str:
         cleaned = re.sub(r"^```(?:\w+)?|```$", "", raw).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
 
-        # --- 僅取第一個走勢詞，避免同時出現多個 ---
         m_trend = re.search(r"(上漲|下跌|不明確)", cleaned)
         trend = m_trend.group(1) if m_trend else "不明確"
 
-        # --- 提取原因，只留前兩句或前40字 ---
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", cleaned)
-        if m_reason:
-            reason_text = m_reason.group(1)
-        else:
-            # 若模型沒寫「原因：」，直接抓整段
-            reason_text = cleaned
-
-        # 保留最多兩句或40字
+        reason_text = m_reason.group(1) if m_reason else cleaned
         sentences = re.split(r"[。.!！；;]", reason_text)
         short_reason = "，".join(sentences[:2]).strip()
         short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
@@ -178,7 +171,6 @@ def ollama_analyze(texts: List[str], target: str) -> str:
 
     except Exception as e:
         return f"[error] Groq 呼叫失敗：{e}"
-
 
 # ---------- 分析通用函數 ----------
 def analyze_target(db, news_col: str, target: str, result_col: str):
@@ -192,25 +184,47 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
         return
 
     filtered = []
+    local_log = []
+
     for it in items:
         if STOP: break
         res = score_text(it["content"] or it["title"], pos_c, neg_c)
         if abs(res.score) >= SCORE_THRESHOLD:
             filtered.append((it, res))
+            trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
+            hits_text = "\n".join(
+                [f"  {'+' if w>0 else '-'} {patt} （{note}）" for patt, w, note in res.hits]
+            )
+            local_log.append(
+                f"[{it['id']}] {it['title']}\n{trend}\n命中：\n{hits_text}\n"
+            )
 
     print(f"[info] 過濾後新聞：{len(filtered)} / {len(items)}")
-    if not filtered: return
+    if not filtered:
+        print("[info] 無符合條件的新聞")
+        return
 
+    # --- Groq 總結 ---
     summary = ollama_analyze([x[0]["content"] or x[0]["title"] for x in filtered], target)
     print(summary)
 
-    # 寫入 Firestore
+    # --- 寫入本地完整分析 ---
+    os.makedirs("result", exist_ok=True)
+    date_str = datetime.now(TAIWAN_TZ).strftime("%Y%m%d_%H%M%S")
+    local_path = f"result/{target}_{date_str}.txt"
+    with open(local_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(local_log))
+        f.write("\n" + "="*60 + "\n")
+        f.write(summary + "\n")
+    print(f"[info] 已保存本地分析檔案：{local_path}")
+
+    # --- 寫入 Firestore 只保留 Groq 結果 ---
     doc_id = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
     db.collection(result_col).document(doc_id).set({
         "timestamp": datetime.now(TAIWAN_TZ),
         "result": summary,
     })
-    print(f"[info] 已寫入 Firestore：{result_col}/{doc_id}")
+    print(f"[info] 已寫入 Firebase：{result_col}/{doc_id}")
 
 # ---------- 主程式 ----------
 def main():
