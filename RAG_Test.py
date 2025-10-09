@@ -11,10 +11,8 @@ import time
 import json
 import warnings
 from datetime import datetime
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from firebase_admin import credentials, firestore, initialize_app
 
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 # ========= Firestore 初始化 =========
 if not len(firebase_admin._apps):
