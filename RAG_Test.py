@@ -203,32 +203,27 @@ def ollama_analyze(texts: List[str], target: str = "台積電", retries=3, delay
     """
     產生 A 格式（兩行）自然語言輸出：
     明天{target}股價走勢：<上漲 / 下跌 / 不明確>
-    原因：<100字以內原因>
-
-    此函式會：
-    - 加強 prompt 要求模型回覆 A 格式
-    - 清洗 model 回傳（去掉 code fence、多餘空行）
-    - 用較寬鬆的 regex 嘗試解析；若仍失敗，使用第一句話或前100字作為原因
-    最終保證回傳兩行格式。
+    原因：<40字以內，簡要一句話說明>
     """
     global STOP
     combined_text = prepare_news_for_llm(texts)
 
-    # Prompt 強調回覆格式（自然語言 A 格式）
     prompt = f"""你是一位專業的台灣股市研究員。請根據以下新聞判斷「明天{target}股價」最可能的走勢。
-請**只回覆**以下兩行格式（不要多做說明、不要增加額外文字）：
+請**只回覆**以下兩行格式（不要多餘文字）：
 
 明天{target}股價走勢：<上漲 / 下跌 / 不明確>
-原因：<100字以內，簡要說明主要理由>
+原因：<40字以內，用一句話簡潔說明主要理由>
 
-範例（有效）：
+❌ 不要列出多個原因、不要分點說明、不要加背景敘述。
+✅ 範例：
 明天{target}股價走勢：上漲
-原因：AI 訂單回溫帶動高階製程出貨，法人維持買超。
+原因：AI 訂單回溫帶動法人買盤。
 
 新聞摘要：
 {combined_text}
 
-⚠️ 注意：輸出**必須**包含「明天{target}股價走勢：」跟「原因：」兩行，trend 只能是 上漲、下跌 或 不明確。Reason 最多 100 字。
+⚠️ 僅允許三種走勢詞：「上漲」「下跌」「不明確」。
+⚠️ 「原因」請保持一句話、少於 40 字。
 """
 
     for i in range(retries):
@@ -238,68 +233,42 @@ def ollama_analyze(texts: List[str], target: str = "台積電", retries=3, delay
             response = client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=[
-                    {"role": "system", "content": "你是一個專業的股市新聞分析助手。"},
+                    {"role": "system", "content": "你是一位專業的股市新聞摘要分析員。"},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.0,  # 穩定輸出
-                max_tokens=300,
+                temperature=0.0,
+                max_tokens=150,
             )
             raw_result = response.choices[0].message.content.strip()
 
-            # 清洗：去除 code fence（``` 或 ```json）及首尾空白
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_result).strip()
-
-            # 把多個空行壓成一個換行，並去掉前後多餘空白
             cleaned = re.sub(r"\r\n", "\n", cleaned)
             cleaned = re.sub(r"\n{2,}", "\n", cleaned).strip()
 
-            # 嘗試用嚴格的正則抓兩行：trend 與 reason
-            # 接受「：」或 ":"，也允許前面有少量雜訊
             m = re.search(
-                r"(明天\s*"+re.escape(target)+r"\s*股價走勢[:：]\s*(上漲|下跌|不明確))\s*[\r\n]+原因[:：]?\s*([^\n]{1,100})",
+                r"(明天\s*"+re.escape(target)+r"\s*股價走勢[:：]\s*(上漲|下跌|不明確))\s*[\r\n]+原因[:：]?\s*([^\n]{1,80})",
                 cleaned
             )
             if m:
                 trend = m.group(2).strip()
                 reason = m.group(3).strip()
-                reason = re.sub(r"\s+", " ", reason)[:100].strip()
-                return f"明天{target}股價走勢：{trend}\n原因：{reason if reason else '未提供明確理由'}"
+                reason = re.sub(r"\s+", " ", reason)[:60].strip("。；,， ")
+                return f"明天{target}股價走勢：{trend}\n原因：{reason}"
 
-            # 寬鬆 fallback：找第一個出現的 上漲/下跌/不明確
+            # fallback
             m_trend = re.search(r"\b(上漲|下跌|不明確)\b", cleaned)
             trend = m_trend.group(1) if m_trend else "不明確"
-
-            # 找「原因：...」或「理由：...」
             m_reason = re.search(r"(?:原因|理由)[:：]?\s*([^\n]{1,200})", cleaned)
-            if m_reason:
-                reason = m_reason.group(1).strip()
-                reason = re.sub(r"\s+", " ", reason)[:100].strip()
-                return f"明天{target}股價走勢：{trend}\n原因：{reason if reason else '未提供明確理由'}"
-
-            # 最後 fallback：取回 cleaned 的前 100 字（去掉標題行）
-            # 若 cleaned 本身就是很多行，取第二行或第一句
-            lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
-            reason_candidate = ""
-            if len(lines) >= 2:
-                # 優先取第二行（假設第一行為走勢）
-                reason_candidate = lines[1][:100]
-            elif len(lines) == 1:
-                # 嘗試從單行中截取一句話
-                reason_candidate = lines[0][:100]
-            else:
-                reason_candidate = ""
-
-            reason_candidate = re.sub(r"\s+", " ", reason_candidate).strip()
-            if not reason_candidate:
-                reason_candidate = "未取得原因或格式不符"
-
-            return f"明天{target}股價走勢：{trend}\n原因：{reason_candidate}"
+            reason = (m_reason.group(1).strip() if m_reason else cleaned[:60])
+            reason = re.sub(r"\s+", " ", reason)[:60].strip("。；,， ")
+            return f"明天{target}股價走勢：{trend}\n原因：{reason}"
 
         except Exception as e:
             print(f"[warn] Groq 呼叫失敗 ({i+1}/{retries})：{e}")
             time.sleep(delay)
 
     return "[error] Groq 呼叫失敗"
+
 
 # ---------- 主程式 ----------
 def main():
