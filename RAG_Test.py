@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-股票新聞分析工具（完整 RAG 版 + 全文打分 + Groq 分析 + Token 傾向顯示）
+股票新聞分析工具（完整 RAG 版 + 全文打分 + Groq 分析 + Token 傾向顯示 + Firestore 回傳結果）
 """
 
 import os
@@ -25,7 +25,15 @@ def load_env():
     else:
         load_dotenv(override=True)
         print("[info] 未找到 .env，改用系統環境變數")
+
 load_env()
+
+# ---------- 確認金鑰 ----------
+GOOGLE_CRED = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # <<< 新增
+if GOOGLE_CRED and os.path.exists(GOOGLE_CRED):
+    print(f"[info] 已找到 Firestore 認證金鑰：{GOOGLE_CRED}")
+else:
+    print("[warn] 未找到 Firestore 認證金鑰（GOOGLE_APPLICATION_CREDENTIALS），可能無法寫入 Firebase。")
 
 # ---------- 參數 ----------
 TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
@@ -34,6 +42,7 @@ SCORE_THRESHOLD   = float(os.getenv("SCORE_THRESHOLD", "3.0"))
 LOOKBACK_DAYS     = int(os.getenv("LOOKBACK_DAYS", "3"))
 OLLAMA_MODEL      = os.getenv("OLLAMA_MODEL", "mistral")
 TITLE_LEN         = 20
+GROQ_RESULT_COLLECTION = "Groq_result"  # <<< 新增
 
 TAIWAN_TZ = timezone(timedelta(hours=8))
 DOCID_RE  = re.compile(r"^(?P<ymd>\d{8})_(?P<hms>\d{6})$")
@@ -84,6 +93,20 @@ def get_db() -> firestore.Client:
     db = firestore.Client()
     print(f"[info] GCP 專案：{db.project}")
     return db
+
+# <<< 新增：儲存分析結果
+def save_groq_result_to_firestore(db: firestore.Client, result_text: str):
+    """將 Groq 分析結果回傳到 Firestore"""
+    try:
+        ts = datetime.now(TAIWAN_TZ).strftime("%Y%m%d_%H%M%S")
+        doc_ref = db.collection(GROQ_RESULT_COLLECTION).document(ts)
+        doc_ref.set({
+            "timestamp": datetime.now(TAIWAN_TZ),
+            "result": result_text,
+        })
+        print(f"[info] 已將分析結果寫入 Firestore：{GROQ_RESULT_COLLECTION}/{ts}")
+    except Exception as e:
+        print(f"[error] 寫入 Firestore 失敗：{e}")
 
 def load_tokens(db: firestore.Client, col_name: str) -> Tuple[List[Token], List[Token]]:
     pos, neg = [], []
@@ -167,35 +190,6 @@ def score_text(text: str, pos_compiled, neg_compiled) -> MatchResult:
             seen_patterns.add(key)
     return MatchResult(score, hits)
 
-def print_token_hits(hits: List[Tuple[str,float,str]]):
-    """修改後：命中 token 顯示 + 統計傾向"""
-    pos_count, neg_count = 0, 0
-    for patt, w, note in hits:
-        why = f"（{note}）" if note else ""
-        if w > 0:
-            rprint(f"  [green]+ 「{patt}」[/green]{why}")
-            pos_count += 1
-        elif w < 0:
-            rprint(f"  [red]- 「{patt}」[/red]{why}")
-            neg_count += 1
-        else:
-            rprint(f"  「{patt}」{why}")
-    tendency = "偏多" if pos_count > neg_count else "偏空" if neg_count > pos_count else "中性"
-    rprint(f"整體傾向：[green]+{pos_count}[/green] / [red]-{neg_count}[/red] → {tendency}")
-
-# ---------- Embedding / FAISS ----------
-def embed_text(text: str):
-    rng = np.random.default_rng(abs(hash(text)) % (2**32))
-    return rng.random(1536, dtype=np.float32)
-
-def build_faiss_index(vectors: List[np.ndarray], news_items: List[Dict]):
-    dim = vectors[0].shape[0]
-    index = faiss.IndexFlatIP(dim)
-    vec_matrix = np.vstack(vectors)
-    faiss.normalize_L2(vec_matrix)
-    index.add(vec_matrix)
-    return index, news_items
-
 # ---------- Groq 分析 ----------
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
@@ -205,39 +199,24 @@ def prepare_news_for_llm(news_items: List[str]) -> str:
         out_lines.append(f"新聞 {i}：\n{shorten_text(txt, 200)}\n")
     return "\n".join(out_lines)
 
-def retrieve_similar_news(index, vectors, top_k=3):
-    results = []
-    for v in vectors:
-        faiss.normalize_L2(v.reshape(1, -1))
-        D, I = index.search(v.reshape(1, -1), top_k)
-        results.append(I[0].tolist())
-    return results
-
 def ollama_analyze(texts: List[str], retries=3, delay=1.5) -> str:
     global STOP
     combined_text = prepare_news_for_llm(texts)
-
     prompt = f"""你是一位專業的台灣股市研究員，請根據以下新聞判斷「明天台積電股價」最可能的走勢。
 
 請整合所有新聞的意涵，選出「整體趨勢」並輸出：
 明天台積電股價走勢：<上漲 / 下跌 / 不明確>
 原因：<100字以內，簡要說明主要理由>
 
-⚠️ 注意：
-- 即使新聞沒有明講漲跌，也要根據隱含的情緒、產業趨勢、財報訊息進行合理推論。
-- 若多數新聞偏正面，請選「上漲」；偏負面則選「下跌」；無法判斷才選「不明確」。
-
 新聞摘要：
 {combined_text}
 """
-
-
     for i in range(retries):
         if STOP:
             return "[stopped] 使用者中斷"
         try:
             response = client.chat.completions.create(
-                model="llama-3.1-8b-instant",  # Groq 免費模型，速度快
+                model="llama-3.1-8b-instant",
                 messages=[
                     {"role": "system", "content": "你是一個專業的股市新聞分析助手。"},
                     {"role": "user", "content": prompt},
@@ -246,8 +225,6 @@ def ollama_analyze(texts: List[str], retries=3, delay=1.5) -> str:
                 max_tokens=300,
             )
             raw_result = response.choices[0].message.content.strip()
-
-            # 照舊處理輸出
             m1 = re.search(r"明天台積電股價走勢[:：]?\s*(上漲|下跌|不明確)", raw_result)
             m2 = re.search(r"原因[:：]?\s*([\s\S]{1,400}?)\s*(?:\n明天|\Z)", raw_result)
             concl = m1.group(1) if m1 else "不明確"
@@ -255,15 +232,11 @@ def ollama_analyze(texts: List[str], retries=3, delay=1.5) -> str:
             reason = reason.replace("\n", " ").strip()
             if len(reason) > 100:
                 reason = reason[:100] + "…"
-
             return f"明天台積電股價走勢：{concl}\n原因：{reason if reason else '未取得原因或格式不符'}"
-
         except Exception as e:
             print(f"[warn] Groq 呼叫失敗 ({i+1}/{retries})：{e}")
             time.sleep(delay)
-
     return "[error] Groq 呼叫失敗"
-
 
 # ---------- 主程式 ----------
 def main():
@@ -271,7 +244,6 @@ def main():
     today = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
     output_file = f"result_{today}.txt"
     with open(output_file, "w", encoding="utf-8") as f:
-
         def out(msg):
             print(msg)
             f.write(msg + "\n")
@@ -301,7 +273,6 @@ def main():
             out("[info] 無新聞達到閾值或已中斷，結束")
             return
 
-        # 以下可以照原本程式 print 改成 out
         for item, res in filtered:
             short_title = item["title"] if item["title"] else item["content"]
             out(f"\n[{item['id']}] {short_title}")
@@ -317,11 +288,13 @@ def main():
                     why = f"（{note}）" if note else ""
                     out(f"  {'+' if w>0 else '-'} {patt} {why}")
 
-        # Groq 分析
         summary = ollama_analyze([n[0]["content"] or n[0]["title"] for n in filtered])
         out("\n--- Groq 生成分析 ---")
         out(summary)
 
+        # <<< 新增：上傳結果至 Firestore
+        save_groq_result_to_firestore(db, summary)
 
 if __name__ == "__main__":
     main()
+解釋一下這在幹嘛
