@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海）
-靜默模式：不顯示任何 [info]/[error] 訊息，只保留命中新聞與 Groq 結果。
+靜默模式：不顯示多餘訊息，只輸出前五則命中新聞與 Groq 結果。
 """
 
-import os, signal, time, regex as re
+import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple, Dict
@@ -13,7 +13,8 @@ from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 設定 ----------
-SILENT_MODE = True  # ✅ 設 True 即完全靜默，只顯示主要分析結果
+SILENT_MODE = True        # ✅ 完全靜默模式
+MAX_DISPLAY_NEWS = 5      # ✅ 終端最多顯示前 5 則新聞
 
 def log(msg: str):
     if not SILENT_MODE:
@@ -22,10 +23,8 @@ def log(msg: str):
 # ---------- 讀 .env ----------
 if os.path.exists(".env"):
     load_dotenv(".env", override=True)
-    log(f"[info] 已載入 .env：{os.path.abspath('.env')}")
 else:
     load_dotenv(override=True)
-    log("[info] 未找到 .env，改用系統環境變數")
 
 # ---------- 常數 ----------
 TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
@@ -71,10 +70,9 @@ def first_n_sentences(text: str, n: int = 3) -> str:
     parts = [p for p in parts if p.strip()]
     if not parts:
         return text.strip()
-    selected = parts[:n]
-    joined = "".join(selected)
+    joined = "".join(parts[:n])
     if not re.search(r'[。\.！!\?？；;]\s*$', joined):
-        joined = joined + "..."
+        joined += "..."
     return joined
 
 def parse_docid_time(doc_id: str):
@@ -102,9 +100,9 @@ def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
             w = float(data.get("weight", 1.0))
         except:
             w = 1.0
-        if not patt or pol not in ("positive","negative"):
+        if not patt or pol not in ("positive", "negative"):
             continue
-        (pos if pol=="positive" else neg).append(Token(pol, ttype, patt, w, note))
+        (pos if pol == "positive" else neg).append(Token(pol, ttype, patt, w, note))
     return pos, neg
 
 def load_news_items(db, col_name: str, days: int) -> List[Dict]:
@@ -119,8 +117,7 @@ def load_news_items(db, col_name: str, days: int) -> List[Dict]:
         for k, v in data.items():
             if not (k.startswith("news_") and isinstance(v, dict)):
                 continue
-            title = str(v.get("title") or "")
-            content = str(v.get("content") or "")
+            title, content = str(v.get("title") or ""), str(v.get("content") or "")
             if not title and not content:
                 continue
             uniq = f"{title}|{content}"
@@ -164,7 +161,7 @@ def score_text(text: str, pos_c, neg_c) -> MatchResult:
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 def prepare_news_for_llm(news_items: List[str]) -> str:
-    return "\n".join(f"新聞 {i}：\n{shorten_text(t)}\n" for i,t in enumerate(news_items,1))
+    return "\n".join(f"新聞 {i}：\n{shorten_text(t)}\n" for i, t in enumerate(news_items, 1))
 
 def ollama_analyze(texts: List[str], target: str) -> str:
     combined = prepare_news_for_llm(texts)
@@ -203,45 +200,34 @@ def ollama_analyze(texts: List[str], target: str) -> str:
 
 # ---------- 分析通用函數 ----------
 def analyze_target(db, news_col: str, target: str, result_col: str):
-    log(f"\n[info] ===== 開始分析 {target} =====")
     pos, neg = load_tokens(db, TOKENS_COLLECTION)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     items = load_news_items(db, news_col, LOOKBACK_DAYS)
     if not items:
-        log(f"[info] {news_col} 無資料")
         return
 
     filtered, local_log, terminal_logs = [], [], []
     for it in items:
         if STOP:
             break
-        text_for_score = it.get("content") or it.get("title") or ""
-        res = score_text(text_for_score, pos_c, neg_c)
+        res = score_text(it.get("content") or it.get("title") or "", pos_c, neg_c)
         if abs(res.score) >= SCORE_THRESHOLD:
             filtered.append((it, res))
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
-            hits_text_lines = [f"  {'+' if w>0 else '-'} {patt} （{note}）" for patt, w, note in res.hits]
-            hits_text = "\n".join(hits_text_lines)
-            local_entry = f"[{it['id']}] {it.get('title','')}\n{trend}\n命中：\n{hits_text}\n\n內文：\n{it.get('content','')}\n"
-            local_log.append(local_entry)
+            hits_text_lines = [f"  {'+' if w>0 else '-'} {patt}（{note}）" for patt, w, note in res.hits]
+            local_log.append(f"[{it['id']}] {it.get('title','')}\n{trend}\n命中：\n" + "\n".join(hits_text_lines))
             truncated_title = first_n_sentences(it.get("title",""), 3)
-            terminal_entry = f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n"
-            terminal_logs.append(terminal_entry)
+            terminal_logs.append(f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n")
 
-    if not filtered:
-        log("[info] 無符合條件的新聞")
-        return
-
-    # --- 顯示命中新聞（保留這部分） ---
-    for t in terminal_logs:
+    # --- 只顯示前五則 ---
+    for t in terminal_logs[:MAX_DISPLAY_NEWS]:
         print(t)
 
-    summary = ollama_analyze([ (x[0].get("content") or x[0].get("title") or "") for x in filtered ], target)
+    summary = ollama_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target)
     print(summary)
 
     os.makedirs("result", exist_ok=True)
-    date_str = datetime.now(TAIWAN_TZ).strftime("%Y%m%d_%H%M%S")
-    local_path = f"result/{target}_{date_str}.txt"
+    local_path = f"result/{target}_{datetime.now(TAIWAN_TZ).strftime('%Y%m%d_%H%M%S')}.txt"
     with open(local_path, "w", encoding="utf-8") as f:
         f.write("\n".join(local_log))
         f.write("\n" + "="*60 + "\n")
@@ -259,6 +245,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
 def main():
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
+    print("\n" + "="*70 + "\n")   # ✅ 分隔線（台積電 ↔ 鴻海）
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
 
 if __name__ == "__main__":
