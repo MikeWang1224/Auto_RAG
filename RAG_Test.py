@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海）
-每天各自產出一份 Groq 結果，分別存入：
-- Groq_result
-- Groq_result_Foxxcon
-同時在本地 result 資料夾保存完整分析紀錄，並在終端輸出詳細新聞命中列表（全部顯示，標題前三句）。
+靜默模式：不顯示任何 [info]/[error] 訊息，只保留命中新聞與 Groq 結果。
 """
 
 import os, signal, time, regex as re
@@ -15,13 +12,20 @@ from google.cloud import firestore
 from dotenv import load_dotenv
 from groq import Groq
 
+# ---------- 設定 ----------
+SILENT_MODE = True  # ✅ 設 True 即完全靜默，只顯示主要分析結果
+
+def log(msg: str):
+    if not SILENT_MODE:
+        print(msg)
+
 # ---------- 讀 .env ----------
 if os.path.exists(".env"):
     load_dotenv(".env", override=True)
-    print(f"[info] 已載入 .env：{os.path.abspath('.env')}")
+    log(f"[info] 已載入 .env：{os.path.abspath('.env')}")
 else:
     load_dotenv(override=True)
-    print("[info] 未找到 .env，改用系統環境變數")
+    log("[info] 未找到 .env，改用系統環境變數")
 
 # ---------- 常數 ----------
 TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
@@ -63,15 +67,12 @@ def shorten_text(t: str, n=200):
 def first_n_sentences(text: str, n: int = 3) -> str:
     if not text:
         return ""
-    # 以中文或英文常見句尾切句
     parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
-    # parts may contain empty strings; filter
     parts = [p for p in parts if p.strip()]
     if not parts:
         return text.strip()
     selected = parts[:n]
     joined = "".join(selected)
-    # 如果原文沒有句點結尾，仍加上...
     if not re.search(r'[。\.！!\?？；;]\s*$', joined):
         joined = joined + "..."
     return joined
@@ -127,7 +128,6 @@ def load_news_items(db, col_name: str, days: int) -> List[Dict]:
                 continue
             seen.add(uniq)
             items.append({"id": f"{d.id}#{k}", "title": title, "content": content, "ts": dt})
-    # 最新在前
     items.sort(key=lambda x: x["ts"] or datetime.min.replace(tzinfo=TAIWAN_TZ), reverse=True)
     return items
 
@@ -190,36 +190,28 @@ def ollama_analyze(texts: List[str], target: str) -> str:
         raw = resp.choices[0].message.content.strip()
         cleaned = re.sub(r"^```(?:\w+)?|```$", "", raw).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
-
         m_trend = re.search(r"(上漲|下跌|不明確)", cleaned)
         trend = m_trend.group(1) if m_trend else "不明確"
-
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", cleaned)
         reason_text = m_reason.group(1) if m_reason else cleaned
         sentences = re.split(r"[。.!！；;]", reason_text)
         short_reason = "，".join(sentences[:2]).strip()
         short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
-
         return f"明天{target}股價走勢：{trend}\n原因：{short_reason}"
-
     except Exception as e:
         return f"[error] Groq 呼叫失敗：{e}"
 
 # ---------- 分析通用函數 ----------
 def analyze_target(db, news_col: str, target: str, result_col: str):
-    print(f"\n[info] ===== 開始分析 {target} =====")
+    log(f"\n[info] ===== 開始分析 {target} =====")
     pos, neg = load_tokens(db, TOKENS_COLLECTION)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
-
     items = load_news_items(db, news_col, LOOKBACK_DAYS)
     if not items:
-        print(f"[info] {news_col} 無資料")
+        log(f"[info] {news_col} 無資料")
         return
 
-    filtered = []
-    local_log = []      # 用於寫入本地完整分析（包含每則命中細節）
-    terminal_logs = []  # 用於終端輸出（格式化後，標題前三句）
-
+    filtered, local_log, terminal_logs = [], [], []
     for it in items:
         if STOP:
             break
@@ -228,64 +220,40 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
         if abs(res.score) >= SCORE_THRESHOLD:
             filtered.append((it, res))
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
-            # 命中列表（包含 token 原文與備註）
             hits_text_lines = [f"  {'+' if w>0 else '-'} {patt} （{note}）" for patt, w, note in res.hits]
             hits_text = "\n".join(hits_text_lines)
-
-            # 本地紀錄（更完整，保留原標題與內文）
             local_entry = f"[{it['id']}] {it.get('title','')}\n{trend}\n命中：\n{hits_text}\n\n內文：\n{it.get('content','')}\n"
             local_log.append(local_entry)
-
-            # 終端顯示紀錄（標題前三句）
             truncated_title = first_n_sentences(it.get("title",""), 3)
-            terminal_entry_lines = [
-                f"[{it['id']}]",
-                f"標題：{truncated_title}",
-                f"{trend}",
-                "命中：",
-            ]
-            terminal_entry_lines += hits_text_lines
-            terminal_entry = "\n".join(terminal_entry_lines) + "\n"
+            terminal_entry = f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n"
             terminal_logs.append(terminal_entry)
 
-    print(f"[info] 過濾後新聞：{len(filtered)} / {len(items)}")
     if not filtered:
-        print("[info] 無符合條件的新聞")
+        log("[info] 無符合條件的新聞")
         return
 
-    # --- 終端印出所有命中新聞（全部） ---
-    print("\n===== 命中新聞列表 =====")
+    # --- 顯示命中新聞（保留這部分） ---
     for t in terminal_logs:
         print(t)
 
-    # --- Groq 總結（僅把命中新聞的 content 或 title 串給 LLM）---
-    news_for_llm = [ (x[0].get("content") or x[0].get("title") or "") for x in filtered ]
-    summary = ollama_analyze(news_for_llm, target)
-    print("===== Groq 分析 =====")
+    summary = ollama_analyze([ (x[0].get("content") or x[0].get("title") or "") for x in filtered ], target)
     print(summary)
 
-    # --- 寫入本地完整分析（包含每則命中新聞的內文與 token 命中細節） ---
     os.makedirs("result", exist_ok=True)
     date_str = datetime.now(TAIWAN_TZ).strftime("%Y%m%d_%H%M%S")
     local_path = f"result/{target}_{date_str}.txt"
     with open(local_path, "w", encoding="utf-8") as f:
-        # 先寫入每則詳細紀錄
         f.write("\n".join(local_log))
         f.write("\n" + "="*60 + "\n")
-        # 再寫入 Groq 總結
         f.write(summary + "\n")
-    print(f"[info] 已保存本地分析檔案：{local_path}")
 
-    # --- 寫入 Firestore 只保留 Groq 結果 ---
-    doc_id = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
     try:
-        db.collection(result_col).document(doc_id).set({
+        db.collection(result_col).document(datetime.now(TAIWAN_TZ).strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ),
             "result": summary,
         })
-        print(f"[info] 已寫入 Firebase：{result_col}/{doc_id}")
     except Exception as e:
-        print(f"[error] 寫入 Firebase 失敗：{e}")
+        log(f"[error] 寫入 Firebase 失敗：{e}")
 
 # ---------- 主程式 ----------
 def main():
