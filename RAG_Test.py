@@ -4,7 +4,7 @@
 每天各自產出一份 Groq 結果，分別存入：
 - Groq_result
 - Groq_result_Foxxcon
-同時在本地 result 資料夾保存完整分析紀錄。
+同時在本地 result 資料夾保存完整分析紀錄，並在終端輸出詳細新聞命中列表（全部顯示，標題前三句）。
 """
 
 import os, signal, time, regex as re
@@ -57,18 +57,37 @@ DOCID_RE = re.compile(r"^(?P<ymd>\d{8})_(?P<hms>\d{6})$")
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
-def shorten_text(t: str, n=200): return t[:n] + "…" if len(t) > n else t
+def shorten_text(t: str, n=200):
+    return t[:n] + "…" if len(t) > n else t
+
+def first_n_sentences(text: str, n: int = 3) -> str:
+    if not text:
+        return ""
+    # 以中文或英文常見句尾切句
+    parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
+    # parts may contain empty strings; filter
+    parts = [p for p in parts if p.strip()]
+    if not parts:
+        return text.strip()
+    selected = parts[:n]
+    joined = "".join(selected)
+    # 如果原文沒有句點結尾，仍加上...
+    if not re.search(r'[。\.！!\?？；;]\s*$', joined):
+        joined = joined + "..."
+    return joined
 
 def parse_docid_time(doc_id: str):
     m = DOCID_RE.match(doc_id)
-    if not m: return None
+    if not m:
+        return None
     try:
         return datetime.strptime(m.group("ymd")+m.group("hms"), "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
     except:
         return None
 
 # ---------- Firestore ----------
-def get_db(): return firestore.Client()
+def get_db():
+    return firestore.Client()
 
 def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
     pos, neg = [], []
@@ -78,27 +97,37 @@ def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
         ttype = (data.get("type") or "substr").lower()
         patt = str(data.get("pattern") or "")
         note = str(data.get("note") or "")
-        try: w = float(data.get("weight", 1.0))
-        except: w = 1.0
-        if not patt or pol not in ("positive","negative"): continue
+        try:
+            w = float(data.get("weight", 1.0))
+        except:
+            w = 1.0
+        if not patt or pol not in ("positive","negative"):
+            continue
         (pos if pol=="positive" else neg).append(Token(pol, ttype, patt, w, note))
     return pos, neg
 
 def load_news_items(db, col_name: str, days: int) -> List[Dict]:
     items, seen = [], set()
-    now, start = datetime.now(TAIWAN_TZ), datetime.now(TAIWAN_TZ) - timedelta(days=days)
+    now = datetime.now(TAIWAN_TZ)
+    start = now - timedelta(days=days)
     for d in db.collection(col_name).stream():
         dt = parse_docid_time(d.id)
-        if dt and dt < start: continue
+        if dt and dt < start:
+            continue
         data = d.to_dict() or {}
         for k, v in data.items():
-            if not (k.startswith("news_") and isinstance(v, dict)): continue
-            title, content = str(v.get("title") or ""), str(v.get("content") or "")
-            if not title and not content: continue
+            if not (k.startswith("news_") and isinstance(v, dict)):
+                continue
+            title = str(v.get("title") or "")
+            content = str(v.get("content") or "")
+            if not title and not content:
+                continue
             uniq = f"{title}|{content}"
-            if uniq in seen: continue
+            if uniq in seen:
+                continue
             seen.add(uniq)
             items.append({"id": f"{d.id}#{k}", "title": title, "content": content, "ts": dt})
+    # 最新在前
     items.sort(key=lambda x: x["ts"] or datetime.min.replace(tzinfo=TAIWAN_TZ), reverse=True)
     return items
 
@@ -108,8 +137,11 @@ def compile_tokens(tokens: List[Token]):
     for t in tokens:
         w = t.weight if t.polarity == "positive" else -abs(t.weight)
         if t.ttype == "regex":
-            try: cre = re.compile(t.pattern, flags=re.IGNORECASE); out.append(("regex", cre, w, t.note, t.pattern))
-            except: continue
+            try:
+                cre = re.compile(t.pattern, flags=re.IGNORECASE)
+                out.append(("regex", cre, w, t.note, t.pattern))
+            except:
+                continue
         else:
             out.append(("substr", None, w, t.note, t.pattern.lower()))
     return out
@@ -119,8 +151,9 @@ def score_text(text: str, pos_c, neg_c) -> MatchResult:
     score, hits, seen = 0.0, [], set()
     for ttype, cre, w, note, patt in pos_c + neg_c:
         key = (ttype, patt)
-        if key in seen: continue
-        matched = cre.search(norm) if ttype=="regex" else patt in norm
+        if key in seen:
+            continue
+        matched = cre.search(norm) if ttype == "regex" else patt in norm
         if matched:
             score += w
             hits.append((patt, w, note))
@@ -184,47 +217,75 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
         return
 
     filtered = []
-    local_log = []
+    local_log = []      # 用於寫入本地完整分析（包含每則命中細節）
+    terminal_logs = []  # 用於終端輸出（格式化後，標題前三句）
 
     for it in items:
-        if STOP: break
-        res = score_text(it["content"] or it["title"], pos_c, neg_c)
+        if STOP:
+            break
+        text_for_score = it.get("content") or it.get("title") or ""
+        res = score_text(text_for_score, pos_c, neg_c)
         if abs(res.score) >= SCORE_THRESHOLD:
             filtered.append((it, res))
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
-            hits_text = "\n".join(
-                [f"  {'+' if w>0 else '-'} {patt} （{note}）" for patt, w, note in res.hits]
-            )
-            local_log.append(
-                f"[{it['id']}] {it['title']}\n{trend}\n命中：\n{hits_text}\n"
-            )
+            # 命中列表（包含 token 原文與備註）
+            hits_text_lines = [f"  {'+' if w>0 else '-'} {patt} （{note}）" for patt, w, note in res.hits]
+            hits_text = "\n".join(hits_text_lines)
+
+            # 本地紀錄（更完整，保留原標題與內文）
+            local_entry = f"[{it['id']}] {it.get('title','')}\n{trend}\n命中：\n{hits_text}\n\n內文：\n{it.get('content','')}\n"
+            local_log.append(local_entry)
+
+            # 終端顯示紀錄（標題前三句）
+            truncated_title = first_n_sentences(it.get("title",""), 3)
+            terminal_entry_lines = [
+                f"[{it['id']}]",
+                f"標題：{truncated_title}",
+                f"{trend}",
+                "命中：",
+            ]
+            terminal_entry_lines += hits_text_lines
+            terminal_entry = "\n".join(terminal_entry_lines) + "\n"
+            terminal_logs.append(terminal_entry)
 
     print(f"[info] 過濾後新聞：{len(filtered)} / {len(items)}")
     if not filtered:
         print("[info] 無符合條件的新聞")
         return
 
-    # --- Groq 總結 ---
-    summary = ollama_analyze([x[0]["content"] or x[0]["title"] for x in filtered], target)
+    # --- 終端印出所有命中新聞（全部） ---
+    print("\n===== 命中新聞列表 =====")
+    for t in terminal_logs:
+        print(t)
+
+    # --- Groq 總結（僅把命中新聞的 content 或 title 串給 LLM）---
+    news_for_llm = [ (x[0].get("content") or x[0].get("title") or "") for x in filtered ]
+    summary = ollama_analyze(news_for_llm, target)
+    print("===== Groq 分析 =====")
     print(summary)
 
-    # --- 寫入本地完整分析 ---
+    # --- 寫入本地完整分析（包含每則命中新聞的內文與 token 命中細節） ---
     os.makedirs("result", exist_ok=True)
     date_str = datetime.now(TAIWAN_TZ).strftime("%Y%m%d_%H%M%S")
     local_path = f"result/{target}_{date_str}.txt"
     with open(local_path, "w", encoding="utf-8") as f:
+        # 先寫入每則詳細紀錄
         f.write("\n".join(local_log))
         f.write("\n" + "="*60 + "\n")
+        # 再寫入 Groq 總結
         f.write(summary + "\n")
     print(f"[info] 已保存本地分析檔案：{local_path}")
 
     # --- 寫入 Firestore 只保留 Groq 結果 ---
     doc_id = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
-    db.collection(result_col).document(doc_id).set({
-        "timestamp": datetime.now(TAIWAN_TZ),
-        "result": summary,
-    })
-    print(f"[info] 已寫入 Firebase：{result_col}/{doc_id}")
+    try:
+        db.collection(result_col).document(doc_id).set({
+            "timestamp": datetime.now(TAIWAN_TZ),
+            "result": summary,
+        })
+        print(f"[info] 已寫入 Firebase：{result_col}/{doc_id}")
+    except Exception as e:
+        print(f"[error] 寫入 Firebase 失敗：{e}")
 
 # ---------- 主程式 ----------
 def main():
