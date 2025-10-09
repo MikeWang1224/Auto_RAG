@@ -135,9 +135,10 @@ def prepare_news_for_llm(news_items: List[str]) -> str:
 def ollama_analyze(texts: List[str], target: str) -> str:
     combined = prepare_news_for_llm(texts)
     prompt = f"""你是一位台灣股市研究員。根據以下新聞，判斷「明天{target}股價」最可能走勢。
-只回覆以下兩行：
+請只回覆以下兩行格式（不要多餘文字）：
+
 明天{target}股價走勢：<上漲 / 下跌 / 不明確>
-原因：<一句話40字內>
+原因：<40字以內，一句話簡潔說明主要理由>
 
 新聞摘要：
 {combined}
@@ -146,21 +147,38 @@ def ollama_analyze(texts: List[str], target: str) -> str:
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "你是專業股市新聞分析員"},
+                {"role": "system", "content": "你是專業股市新聞分析員，回答簡潔準確。"},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
             max_tokens=150,
         )
         raw = resp.choices[0].message.content.strip()
-        m = re.search(
-            rf"(明天\s*{re.escape(target)}\s*股價走勢[:：]\s*(上漲|下跌|不明確))\s*[\r\n]+原因[:：]?\s*([^\n]{{1,80}})",
-            raw)
-        if m:
-            return f"明天{target}股價走勢：{m.group(2)}\n原因：{m.group(3).strip()[:60]}"
-        return raw
+        cleaned = re.sub(r"^```(?:\w+)?|```$", "", raw).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+
+        # --- 僅取第一個走勢詞，避免同時出現多個 ---
+        m_trend = re.search(r"(上漲|下跌|不明確)", cleaned)
+        trend = m_trend.group(1) if m_trend else "不明確"
+
+        # --- 提取原因，只留前兩句或前40字 ---
+        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", cleaned)
+        if m_reason:
+            reason_text = m_reason.group(1)
+        else:
+            # 若模型沒寫「原因：」，直接抓整段
+            reason_text = cleaned
+
+        # 保留最多兩句或40字
+        sentences = re.split(r"[。.!！；;]", reason_text)
+        short_reason = "，".join(sentences[:2]).strip()
+        short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
+
+        return f"明天{target}股價走勢：{trend}\n原因：{short_reason}"
+
     except Exception as e:
         return f"[error] Groq 呼叫失敗：{e}"
+
 
 # ---------- 分析通用函數 ----------
 def analyze_target(db, news_col: str, target: str, result_col: str):
