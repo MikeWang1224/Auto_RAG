@@ -1,146 +1,252 @@
 # -*- coding: utf-8 -*-
 """
-股票新聞分析工具（修正版：新聞命中時僅取與公司相關的句子）
- - 若新聞中沒有提到該公司，則不納入命中。
- - Groq 分析邏輯不變。
+股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海）
+靜默模式：不顯示多餘訊息，只輸出前五則命中新聞與 Groq 結果。
 """
 
-import os
-import re
-import time
-import json
-import warnings
-from datetime import datetime
-from firebase_admin import credentials, firestore, initialize_app
+import os, signal, regex as re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import List, Tuple, Dict
+from google.cloud import firestore
+from dotenv import load_dotenv
+from groq import Groq
 
+# ---------- 設定 ----------
+SILENT_MODE = True        # ✅ 完全靜默模式
+MAX_DISPLAY_NEWS = 5      # ✅ 終端最多顯示前 5 則新聞
 
-# ========= Firestore 初始化 =========
-if not len(firebase_admin._apps):
-    cred = credentials.Certificate("gcp-key.json")
-    initialize_app(cred)
-db = firestore.client()
+def log(msg: str):
+    if not SILENT_MODE:
+        print(msg)
 
-# ========= 公司關鍵字設定 =========
-COMPANY_KEYWORDS = {
-    "台積電": ["台積電", "TSMC", "2330"],
-    "鴻海": ["鴻海", "Foxconn", "2317"],
-    "聯電": ["聯電", "UMC", "2303"],
-}
+# ---------- 讀 .env ----------
+if os.path.exists(".env"):
+    load_dotenv(".env", override=True)
+else:
+    load_dotenv(override=True)
 
-# ========= 分數與命中詞庫設定 =========
-SCORE_THRESHOLD = 0.8
+# ---------- 常數 ----------
+TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
+NEWS_COLLECTION_TSMC = "NEWS"
+NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "3.0"))
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "3"))
+TAIWAN_TZ = timezone(timedelta(hours=8))
 
-POSITIVE_TOKENS = ["大漲", "上漲", "飆升", "創高", "獲利", "突破", "看好", "買盤湧入", "漲停"]
-NEGATIVE_TOKENS = ["下跌", "重挫", "走跌", "翻黑", "疲弱", "賣壓", "利空", "跌停", "衰退"]
+STOP = False
+def _sigint_handler(signum, frame):
+    global STOP
+    STOP = True
+    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
+signal.signal(signal.SIGINT, _sigint_handler)
 
+# ---------- 結構 ----------
+@dataclass
+class Token:
+    polarity: str
+    ttype: str
+    pattern: str
+    weight: float
+    note: str
 
-# ========= 工具函式 =========
+@dataclass
+class MatchResult:
+    score: float
+    hits: List[Tuple[str, float, str]]
+
+# ---------- 工具 ----------
+DOCID_RE = re.compile(r"^(?P<ymd>\d{8})_(?P<hms>\d{6})$")
 def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip())
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
 
+def shorten_text(t: str, n=200):
+    return t[:n] + "…" if len(t) > n else t
 
-def score_text(text: str, pos_tokens, neg_tokens):
-    """
-    根據命中詞數打分：正面詞 +1，負面詞 -1
-    """
-    pos_hits = [t for t in pos_tokens if t in text]
-    neg_hits = [t for t in neg_tokens if t in text]
-    score = len(pos_hits) - len(neg_hits)
-    total = len(pos_hits) + len(neg_hits)
-    if total == 0:
-        return {"score": 0, "pos_hits": [], "neg_hits": []}
-    return {"score": score / total, "pos_hits": pos_hits, "neg_hits": neg_hits}
+def first_n_sentences(text: str, n: int = 3) -> str:
+    if not text:
+        return ""
+    parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
+    parts = [p for p in parts if p.strip()]
+    if not parts:
+        return text.strip()
+    joined = "".join(parts[:n])
+    if not re.search(r'[。\.！!\?？；;]\s*$', joined):
+        joined += "..."
+    return joined
 
+def parse_docid_time(doc_id: str):
+    m = DOCID_RE.match(doc_id)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group("ymd")+m.group("hms"), "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
+    except:
+        return None
 
-def extract_company_related_text(text: str, company: str) -> str:
-    """
-    從文章中提取包含公司關鍵字的句子或片段。
-    若找不到，回傳空字串。
-    """
-    keywords = COMPANY_KEYWORDS.get(company, [company])
-    # 改成更寬鬆的分段方式（包含逗號、頓號、空格）
-    parts = re.split(r'[。！？；,.、\s]', text)
-    related = [p.strip() for p in parts if any(kw in p for kw in keywords)]
+# ---------- Firestore ----------
+def get_db():
+    return firestore.Client()
 
-    # 若沒有直接命中，嘗試從全文找出包含公司名的片段
-    if not related:
-        for kw in keywords:
-            match = re.search(rf'[^。！？；.!?]*{kw}[^。！？；.!?]*', text)
-            if match:
-                related.append(match.group().strip())
-
-    return "。".join(related)
-
-
-# ========= 主邏輯 =========
-def analyze_target(target: str, news_list: list):
-    """
-    分析指定公司的新聞，並回傳命中清單。
-    """
-    print(f"[info] ===== 開始分析 {target} =====")
-    matched_news = []
-
-    for it in news_list:
-        title = it.get("title", "")
-        content = it.get("content", "")
-        text_raw = f"{title}。{content}"
-
-        # 取出與公司相關的句子
-        text_for_score = extract_company_related_text(text_raw, target)
-        if not text_for_score.strip():
-            print(f"[warn] {target} 無關新聞：{title}")
+def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
+    pos, neg = [], []
+    for d in db.collection(col).stream():
+        data = d.to_dict() or {}
+        pol = (data.get("polarity") or "").lower()
+        ttype = (data.get("type") or "substr").lower()
+        patt = str(data.get("pattern") or "")
+        note = str(data.get("note") or "")
+        try:
+            w = float(data.get("weight", 1.0))
+        except:
+            w = 1.0
+        if not patt or pol not in ("positive", "negative"):
             continue
+        (pos if pol == "positive" else neg).append(Token(pol, ttype, patt, w, note))
+    return pos, neg
+
+def load_news_items(db, col_name: str, days: int) -> List[Dict]:
+    items, seen = [], set()
+    now = datetime.now(TAIWAN_TZ)
+    start = now - timedelta(days=days)
+    for d in db.collection(col_name).stream():
+        dt = parse_docid_time(d.id)
+        if dt and dt < start:
+            continue
+        data = d.to_dict() or {}
+        for k, v in data.items():
+            if not (k.startswith("news_") and isinstance(v, dict)):
+                continue
+            title, content = str(v.get("title") or ""), str(v.get("content") or "")
+            if not title and not content:
+                continue
+            uniq = f"{title}|{content}"
+            if uniq in seen:
+                continue
+            seen.add(uniq)
+            items.append({"id": f"{d.id}#{k}", "title": title, "content": content, "ts": dt})
+    items.sort(key=lambda x: x["ts"] or datetime.min.replace(tzinfo=TAIWAN_TZ), reverse=True)
+    return items
+
+# ---------- Token 打分 ----------
+def compile_tokens(tokens: List[Token]):
+    out = []
+    for t in tokens:
+        w = t.weight if t.polarity == "positive" else -abs(t.weight)
+        if t.ttype == "regex":
+            try:
+                cre = re.compile(t.pattern, flags=re.IGNORECASE)
+                out.append(("regex", cre, w, t.note, t.pattern))
+            except:
+                continue
         else:
-            print(f"[ok] {target} 命中句子：{text_for_score}")
+            out.append(("substr", None, w, t.note, t.pattern.lower()))
+    return out
 
-        # Token 打分
-        res = score_text(text_for_score, POSITIVE_TOKENS, NEGATIVE_TOKENS)
+def score_text(text: str, pos_c, neg_c) -> MatchResult:
+    norm = normalize(text)
+    score, hits, seen = 0.0, [], set()
+    for ttype, cre, w, note, patt in pos_c + neg_c:
+        key = (ttype, patt)
+        if key in seen:
+            continue
+        matched = cre.search(norm) if ttype == "regex" else patt in norm
+        if matched:
+            score += w
+            hits.append((patt, w, note))
+            seen.add(key)
+    return MatchResult(score, hits)
 
-        # 若分數超過門檻，加入命中清單
-        if abs(res["score"]) >= SCORE_THRESHOLD:
-            matched_news.append({
-                "id": it.get("id", ""),
-                "title": title,
-                "score": res["score"],
-                "pos_hits": res["pos_hits"],
-                "neg_hits": res["neg_hits"],
-                "related_text": text_for_score
-            })
+# ---------- Groq ----------
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-    print(f"[info] 過濾後新聞：{len(matched_news)} / {len(news_list)}")
-    if not matched_news:
-        print(f"[info] 無符合條件的新聞\n")
-        return []
+def prepare_news_for_llm(news_items: List[str]) -> str:
+    return "\n".join(f"新聞 {i}：\n{shorten_text(t)}\n" for i, t in enumerate(news_items, 1))
 
-    # 只取前 5 則
-    matched_news = sorted(matched_news, key=lambda x: -abs(x["score"]))[:5]
-    return matched_news
+def ollama_analyze(texts: List[str], target: str) -> str:
+    combined = prepare_news_for_llm(texts)
+    prompt = f"""你是一位台灣股市研究員。根據以下新聞，判斷「明天{target}股價」最可能走勢。
+請只回覆以下兩行格式（不要多餘文字）：
 
+明天{target}股價走勢：<上漲 / 下跌 / 不明確>
+原因：<40字以內，一句話簡潔說明主要理由>
 
-# ========= 測試或整合範例 =========
+新聞摘要：
+{combined}
+"""
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "你是專業股市新聞分析員，回答簡潔準確。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=150,
+        )
+        raw = resp.choices[0].message.content.strip()
+        cleaned = re.sub(r"^```(?:\w+)?|```$", "", raw).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        m_trend = re.search(r"(上漲|下跌|不明確)", cleaned)
+        trend = m_trend.group(1) if m_trend else "不明確"
+        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", cleaned)
+        reason_text = m_reason.group(1) if m_reason else cleaned
+        sentences = re.split(r"[。.!！；;]", reason_text)
+        short_reason = "，".join(sentences[:2]).strip()
+        short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
+        return f"明天{target}股價走勢：{trend}\n原因：{short_reason}"
+    except Exception as e:
+        return f"[error] Groq 呼叫失敗：{e}"
+
+# ---------- 分析通用函數 ----------
+def analyze_target(db, news_col: str, target: str, result_col: str):
+    pos, neg = load_tokens(db, TOKENS_COLLECTION)
+    pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
+    items = load_news_items(db, news_col, LOOKBACK_DAYS)
+    if not items:
+        return
+
+    filtered, local_log, terminal_logs = [], [], []
+    for it in items:
+        if STOP:
+            break
+        res = score_text(it.get("content") or it.get("title") or "", pos_c, neg_c)
+        if abs(res.score) >= SCORE_THRESHOLD:
+            filtered.append((it, res))
+            trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
+            hits_text_lines = [f"  {'+' if w>0 else '-'} {patt}（{note}）" for patt, w, note in res.hits]
+            local_log.append(f"[{it['id']}] {it.get('title','')}\n{trend}\n命中：\n" + "\n".join(hits_text_lines))
+            truncated_title = first_n_sentences(it.get("title",""), 3)
+            terminal_logs.append(f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n")
+
+    # --- 只顯示前五則 ---
+    for t in terminal_logs[:MAX_DISPLAY_NEWS]:
+        print(t)
+
+    summary = ollama_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target)
+    print(summary)
+
+    os.makedirs("result", exist_ok=True)
+    local_path = f"result/{target}_{datetime.now(TAIWAN_TZ).strftime('%Y%m%d_%H%M%S')}.txt"
+    with open(local_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(local_log))
+        f.write("\n" + "="*60 + "\n")
+        f.write(summary + "\n")
+
+    try:
+        db.collection(result_col).document(datetime.now(TAIWAN_TZ).strftime("%Y%m%d")).set({
+            "timestamp": datetime.now(TAIWAN_TZ),
+            "result": summary,
+        })
+    except Exception as e:
+        log(f"[error] 寫入 Firebase 失敗：{e}")
+
+# ---------- 主程式 ----------
+def main():
+    db = get_db()
+    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
+    print("\n" + "="*70 + "\n")   # ✅ 分隔線（台積電 ↔ 鴻海）
+    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
+
 if __name__ == "__main__":
-    # 模擬資料
-    news_data = [
-        {
-            "id": "news_8",
-            "title": "台積電上漲25元開高！台股一度飆近400點 鴻海、廣達卻慘翻黑...",
-            "content": "台股今日開盤氣勢如虹，台積電領漲，但鴻海、廣達表現疲弱。",
-        },
-        {
-            "id": "news_9",
-            "title": "鴻海宣布新電動車計畫，市場反應熱烈！",
-            "content": "法人指出鴻海未來成長動能強勁，投資人樂觀看待。",
-        },
-    ]
-
-    # 分析兩家公司
-    tsmc_hits = analyze_target("台積電", news_data)
-    honhai_hits = analyze_target("鴻海", news_data)
-
-    print("\n=== 台積電命中結果 ===")
-    for h in tsmc_hits:
-        print(f"【{h['title']}】→ 分數 {h['score']:.2f}")
-
-    print("\n=== 鴻海命中結果 ===")
-    for h in honhai_hits:
-        print(f"【{h['title']}】→ 分數 {h['score']:.2f}")
+    main()
