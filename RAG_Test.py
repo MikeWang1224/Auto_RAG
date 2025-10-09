@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（完整 RAG 版 + 全文打分 + Groq 分析 + Token 傾向顯示 + Firestore 回傳結果）
+已修改：讓 Groq 輸出穩定為兩行簡潔格式（A 格式）
 """
 
 import os
@@ -29,7 +30,7 @@ def load_env():
 load_env()
 
 # ---------- 確認金鑰 ----------
-GOOGLE_CRED = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # <<< 新增
+GOOGLE_CRED = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 if GOOGLE_CRED and os.path.exists(GOOGLE_CRED):
     print(f"[info] 已找到 Firestore 認證金鑰：{GOOGLE_CRED}")
 else:
@@ -42,7 +43,7 @@ SCORE_THRESHOLD   = float(os.getenv("SCORE_THRESHOLD", "3.0"))
 LOOKBACK_DAYS     = int(os.getenv("LOOKBACK_DAYS", "3"))
 OLLAMA_MODEL      = os.getenv("OLLAMA_MODEL", "mistral")
 TITLE_LEN         = 20
-GROQ_RESULT_COLLECTION = "Groq_result"  # <<< 新增
+GROQ_RESULT_COLLECTION = "Groq_result"
 
 TAIWAN_TZ = timezone(timedelta(hours=8))
 DOCID_RE  = re.compile(r"^(?P<ymd>\d{8})_(?P<hms>\d{6})$")
@@ -94,7 +95,6 @@ def get_db() -> firestore.Client:
     print(f"[info] GCP 專案：{db.project}")
     return db
 
-# <<< 新增：儲存分析結果
 def save_groq_result_to_firestore(db: firestore.Client, result_text: str):
     """將 Groq 分析結果回傳到 Firestore"""
     try:
@@ -131,15 +131,15 @@ def load_news_items(db: firestore.Client, col_name: str, lookback_days: int) -> 
     start_tw = now_tw - timedelta(days=lookback_days)
     for d in db.collection(col_name).stream():
         dt = parse_docid_time(d.id)
-        if dt and dt < start_tw: 
+        if dt and dt < start_tw:
             continue
         data = d.to_dict() or {}
         for key, val in data.items():
-            if not (isinstance(key,str) and key.startswith("news_") and isinstance(val,dict)): 
+            if not (isinstance(key,str) and key.startswith("news_") and isinstance(val,dict)):
                 continue
             title   = str(val.get("title") or "").strip()
             content = str(val.get("content") or "").strip()
-            if not title and not content: 
+            if not title and not content:
                 continue
             uniq_key = f"{title}|{content}"
             if uniq_key in seen:
@@ -199,18 +199,38 @@ def prepare_news_for_llm(news_items: List[str]) -> str:
         out_lines.append(f"新聞 {i}：\n{shorten_text(txt, 200)}\n")
     return "\n".join(out_lines)
 
-def ollama_analyze(texts: List[str], retries=3, delay=1.5) -> str:
+def ollama_analyze(texts: List[str], target: str = "台積電", retries=3, delay=1.5) -> str:
+    """
+    產生 A 格式（兩行）自然語言輸出：
+    明天{target}股價走勢：<上漲 / 下跌 / 不明確>
+    原因：<100字以內原因>
+
+    此函式會：
+    - 加強 prompt 要求模型回覆 A 格式
+    - 清洗 model 回傳（去掉 code fence、多餘空行）
+    - 用較寬鬆的 regex 嘗試解析；若仍失敗，使用第一句話或前100字作為原因
+    最終保證回傳兩行格式。
+    """
     global STOP
     combined_text = prepare_news_for_llm(texts)
-    prompt = f"""你是一位專業的台灣股市研究員，請根據以下新聞判斷「明天台積電股價」最可能的走勢。
 
-請整合所有新聞的意涵，選出「整體趨勢」並輸出：
-明天台積電股價走勢：<上漲 / 下跌 / 不明確>
+    # Prompt 強調回覆格式（自然語言 A 格式）
+    prompt = f"""你是一位專業的台灣股市研究員。請根據以下新聞判斷「明天{target}股價」最可能的走勢。
+請**只回覆**以下兩行格式（不要多做說明、不要增加額外文字）：
+
+明天{target}股價走勢：<上漲 / 下跌 / 不明確>
 原因：<100字以內，簡要說明主要理由>
+
+範例（有效）：
+明天{target}股價走勢：上漲
+原因：AI 訂單回溫帶動高階製程出貨，法人維持買超。
 
 新聞摘要：
 {combined_text}
+
+⚠️ 注意：輸出**必須**包含「明天{target}股價走勢：」跟「原因：」兩行，trend 只能是 上漲、下跌 或 不明確。Reason 最多 100 字。
 """
+
     for i in range(retries):
         if STOP:
             return "[stopped] 使用者中斷"
@@ -221,21 +241,64 @@ def ollama_analyze(texts: List[str], retries=3, delay=1.5) -> str:
                     {"role": "system", "content": "你是一個專業的股市新聞分析助手。"},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.2,
+                temperature=0.0,  # 穩定輸出
                 max_tokens=300,
             )
             raw_result = response.choices[0].message.content.strip()
-            m1 = re.search(r"明天台積電股價走勢[:：]?\s*(上漲|下跌|不明確)", raw_result)
-            m2 = re.search(r"原因[:：]?\s*([\s\S]{1,400}?)\s*(?:\n明天|\Z)", raw_result)
-            concl = m1.group(1) if m1 else "不明確"
-            reason = m2.group(1).strip() if m2 else ""
-            reason = reason.replace("\n", " ").strip()
-            if len(reason) > 100:
-                reason = reason[:100] + "…"
-            return f"明天台積電股價走勢：{concl}\n原因：{reason if reason else '未取得原因或格式不符'}"
+
+            # 清洗：去除 code fence（``` 或 ```json）及首尾空白
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_result).strip()
+
+            # 把多個空行壓成一個換行，並去掉前後多餘空白
+            cleaned = re.sub(r"\r\n", "\n", cleaned)
+            cleaned = re.sub(r"\n{2,}", "\n", cleaned).strip()
+
+            # 嘗試用嚴格的正則抓兩行：trend 與 reason
+            # 接受「：」或 ":"，也允許前面有少量雜訊
+            m = re.search(
+                r"(明天\s*"+re.escape(target)+r"\s*股價走勢[:：]\s*(上漲|下跌|不明確))\s*[\r\n]+原因[:：]?\s*([^\n]{1,100})",
+                cleaned
+            )
+            if m:
+                trend = m.group(2).strip()
+                reason = m.group(3).strip()
+                reason = re.sub(r"\s+", " ", reason)[:100].strip()
+                return f"明天{target}股價走勢：{trend}\n原因：{reason if reason else '未提供明確理由'}"
+
+            # 寬鬆 fallback：找第一個出現的 上漲/下跌/不明確
+            m_trend = re.search(r"\b(上漲|下跌|不明確)\b", cleaned)
+            trend = m_trend.group(1) if m_trend else "不明確"
+
+            # 找「原因：...」或「理由：...」
+            m_reason = re.search(r"(?:原因|理由)[:：]?\s*([^\n]{1,200})", cleaned)
+            if m_reason:
+                reason = m_reason.group(1).strip()
+                reason = re.sub(r"\s+", " ", reason)[:100].strip()
+                return f"明天{target}股價走勢：{trend}\n原因：{reason if reason else '未提供明確理由'}"
+
+            # 最後 fallback：取回 cleaned 的前 100 字（去掉標題行）
+            # 若 cleaned 本身就是很多行，取第二行或第一句
+            lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+            reason_candidate = ""
+            if len(lines) >= 2:
+                # 優先取第二行（假設第一行為走勢）
+                reason_candidate = lines[1][:100]
+            elif len(lines) == 1:
+                # 嘗試從單行中截取一句話
+                reason_candidate = lines[0][:100]
+            else:
+                reason_candidate = ""
+
+            reason_candidate = re.sub(r"\s+", " ", reason_candidate).strip()
+            if not reason_candidate:
+                reason_candidate = "未取得原因或格式不符"
+
+            return f"明天{target}股價走勢：{trend}\n原因：{reason_candidate}"
+
         except Exception as e:
             print(f"[warn] Groq 呼叫失敗 ({i+1}/{retries})：{e}")
             time.sleep(delay)
+
     return "[error] Groq 呼叫失敗"
 
 # ---------- 主程式 ----------
@@ -288,11 +351,11 @@ def main():
                     why = f"（{note}）" if note else ""
                     out(f"  {'+' if w>0 else '-'} {patt} {why}")
 
-        summary = ollama_analyze([n[0]["content"] or n[0]["title"] for n in filtered])
+        summary = ollama_analyze([n[0]["content"] or n[0]["title"] for n in filtered], target="台積電")
         out("\n--- Groq 生成分析 ---")
         out(summary)
 
-        # <<< 新增：上傳結果至 Firestore
+        # 上傳結果至 Firestore
         save_groq_result_to_firestore(db, summary)
 
 if __name__ == "__main__":
