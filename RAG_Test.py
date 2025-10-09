@@ -4,6 +4,7 @@
 靜默模式：不顯示多餘訊息，只輸出前五則命中新聞與 Groq 結果。
 """
 
+
 import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
