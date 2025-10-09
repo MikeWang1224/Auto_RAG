@@ -3,11 +3,13 @@
 [info] ===== 開始分析 台積電 =====
 [info] 過濾後新聞：18 / 39
 明天台積電股價走勢：上漲
-原因：AMD與OpenAI合作，台積電ADR衝漲破300美元大關，市場對台積電股價走勢
-[info] 已寫入 Firestore：Groq_result/20251009
+原因：AMD與OpenAI達成戰略合作夥伴關係，台積電ADR衝漲破3百美元大關，台股台
+[info] 已保存本地分析檔案：result/台積電_20251009_153415.txt
+[info] 已寫入 Firebase：Groq_result/20251009
 
 [info] ===== 開始分析 鴻海 =====
 [info] 過濾後新聞：1 / 8
 明天鴻海股價走勢：下跌
 原因：鴻海股價在開盤後一度上漲，但隨後受到賣壓湧現而翻黑，目前在平盤以下
-[info] 已寫入 Firestore：Groq_result_Foxxcon/20251009
+[info] 已保存本地分析檔案：result/鴻海_20251009_153416.txt
+[info] 已寫入 Firebase：Groq_result_Foxxcon/20251009
