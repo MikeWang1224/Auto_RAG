@@ -297,4 +297,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-解釋一下這在幹嘛
