@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海）
-強化版：
-✅ 命中判定放寬（利多、合作、成長等字樣視為偏多）
-✅ 鴻海新聞特例：AI / 電動車 / 蘋果 / 伺服器 關聯自動視為利多
-✅ 原始 Firestore、Groq 流程不變
+更新版：
+✅ 僅在句子中提及目標股票名稱時才進行 token 命中判斷。
+✅ 移除內建預設 token（完全使用 Firebase tokens）
 """
 
 import os, signal, regex as re
@@ -41,7 +40,7 @@ STOP = False
 def _sigint_handler(signum, frame):
     global STOP
     STOP = True
-    print("\n[info] 偵測到 Ctrl+C，安全停止中…")
+    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
 signal.signal(signal.SIGINT, _sigint_handler)
 
 # ---------- 結構 ----------
@@ -60,6 +59,7 @@ class MatchResult:
 
 # ---------- 工具 ----------
 DOCID_RE = re.compile(r"^(?P<ymd>\d{8})_(?P<hms>\d{6})$")
+
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
@@ -106,7 +106,7 @@ def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
         if not patt or pol not in ("positive", "negative"):
             continue
         (pos if pol == "positive" else neg).append(Token(pol, ttype, patt, w, note))
-    return pos, neg
+    return pos, neg  # ✅ 內建 Token 已移除
 
 def load_news_items(db, col_name: str, days: int) -> List[Dict]:
     items, seen = [], set()
@@ -146,7 +146,6 @@ def compile_tokens(tokens: List[Token]):
             out.append(("substr", None, w, t.note, t.pattern.lower()))
     return out
 
-# ✅ 改良版：含寬鬆命中與鴻海特例
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
@@ -175,11 +174,10 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         company_spans.sort()
         if not company_spans:
             continue
-
-        to_check = []
         if len(company_spans) == 1 and re.search(alias_pattern, sent):
             to_check = [sent]
         else:
+            to_check = []
             for i, (pos, name) in enumerate(company_spans):
                 next_pos = company_spans[i + 1][0] if i + 1 < len(company_spans) else len(sent)
                 segment = sent[pos:next_pos]
@@ -196,20 +194,6 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
                     score += w
                     hits.append((patt, w, note))
                     seen.add(key)
-
-    # ✅ 寬鬆判定邏輯
-    positive_hint = any(x in norm for x in ["成長", "利多", "合作", "擴產", "超標", "強勢", "創高"])
-    negative_hint = any(x in norm for x in ["衰退", "利空", "減產", "下滑", "疲弱", "裁員"])
-    if score < SCORE_THRESHOLD and positive_hint:
-        score += 2.0
-    if score > -SCORE_THRESHOLD and negative_hint:
-        score -= 2.0
-
-    # ✅ 鴻海特例（AI / 電動車 / 蘋果 / 伺服器）
-    if target == "鴻海":
-        if any(x in norm for x in ["蘋果", "ai", "電動車", "伺服器", "增產"]):
-            score += 3.0
-
     return MatchResult(score, hits)
 
 # ---------- Groq ----------
@@ -266,25 +250,30 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
         if STOP:
             break
         res = score_text(it.get("content") or it.get("title") or "", pos_c, neg_c, target)
-        if abs(res.score) >= SCORE_THRESHOLD:
+        if abs(res.score) >= SCORE_THRESHOLD and res.hits:
             filtered.append((it, res))
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
             hits_text_lines = [f"  {'+' if w>0 else '-'} {patt}（{note}）" for patt, w, note in res.hits]
+            local_log.append(f"[{it['id']}] {it.get('title','')}\n{trend}\n命中：\n" + "\n".join(hits_text_lines))
             truncated_title = first_n_sentences(it.get("title",""), 3)
             terminal_logs.append(f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n")
 
     for t in terminal_logs[:MAX_DISPLAY_NEWS]:
         print(t)
 
-    summary = ollama_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target)
+    if filtered:
+        summary = ollama_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target)
+    else:
+        summary = f"明天{target}股價走勢：不明確\n原因：近期新聞缺乏有效信號"
+
     print(summary)
 
     os.makedirs("result", exist_ok=True)
     local_path = f"result/{target}_{datetime.now(TAIWAN_TZ).strftime('%Y%m%d_%H%M%S')}.txt"
     with open(local_path, "w", encoding="utf-8") as f:
-        for t in terminal_logs:
-            f.write(t + "\n")
-        f.write("="*60 + "\n" + summary + "\n")
+        f.write("\n".join(local_log))
+        f.write("\n" + "="*60 + "\n")
+        f.write(summary + "\n")
 
     try:
         db.collection(result_col).document(datetime.now(TAIWAN_TZ).strftime("%Y%m%d")).set({
@@ -292,7 +281,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
             "result": summary,
         })
     except Exception as e:
-        log(f"[error] Firebase 寫入失敗：{e}")
+        log(f"[error] 寫入 Firebase 失敗：{e}")
 
 # ---------- 主程式 ----------
 def main():
