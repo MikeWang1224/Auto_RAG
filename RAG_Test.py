@@ -3,7 +3,8 @@
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海）
 更新版：
 ✅ 僅在句子中提及目標股票名稱時才進行 token 命中判斷。
-✅ 移除內建預設 token（完全使用 Firebase tokens）
+✅ 刪除內建 token，僅使用 Firebase token。
+✅ 鴻海永不出現「不明確」，平分時自動用關鍵字判斷方向。
 """
 
 import os, signal, regex as re
@@ -59,7 +60,6 @@ class MatchResult:
 
 # ---------- 工具 ----------
 DOCID_RE = re.compile(r"^(?P<ymd>\d{8})_(?P<hms>\d{6})$")
-
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
@@ -106,7 +106,7 @@ def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
         if not patt or pol not in ("positive", "negative"):
             continue
         (pos if pol == "positive" else neg).append(Token(pol, ttype, patt, w, note))
-    return pos, neg  # ✅ 內建 Token 已移除
+    return pos, neg
 
 def load_news_items(db, col_name: str, days: int) -> List[Dict]:
     items, seen = [], set()
@@ -146,6 +146,7 @@ def compile_tokens(tokens: List[Token]):
             out.append(("substr", None, w, t.note, t.pattern.lower()))
     return out
 
+# ✅ 改良版：只分析包含目標股票名的句子
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
@@ -157,7 +158,6 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     all_aliases = sum(aliases.values(), []) + ["台積電", "鴻海"]
     target_aliases = [target.lower()] + aliases.get(target, [])
     alias_pattern = "|".join(re.escape(a.lower()) for a in target_aliases)
-    all_pattern = "|".join(re.escape(a.lower()) for a in all_aliases)
 
     if not re.search(alias_pattern, norm):
         return MatchResult(0.0, [])
@@ -202,7 +202,7 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 def prepare_news_for_llm(news_items: List[str]) -> str:
     return "\n".join(f"新聞 {i}：\n{shorten_text(t)}\n" for i, t in enumerate(news_items, 1))
 
-def ollama_analyze(texts: List[str], target: str) -> str:
+def ollama_analyze(texts: List[str], target: str, force_direction: bool = False) -> str:
     combined = prepare_news_for_llm(texts)
     prompt = f"""你是一位台灣股市研究員。根據以下新聞，判斷「明天{target}股價」最可能走勢。
 請只回覆以下兩行格式（不要多餘文字）：
@@ -226,19 +226,36 @@ def ollama_analyze(texts: List[str], target: str) -> str:
         raw = resp.choices[0].message.content.strip()
         cleaned = re.sub(r"^```(?:\w+)?|```$", "", raw).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
+
+        # 解析模型預測
         m_trend = re.search(r"(上漲|下跌|不明確)", cleaned)
         trend = m_trend.group(1) if m_trend else "不明確"
+
+        # 解析原因
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", cleaned)
         reason_text = m_reason.group(1) if m_reason else cleaned
         sentences = re.split(r"[。.!！；;]", reason_text)
         short_reason = "，".join(sentences[:2]).strip()
         short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
+
+        # 鴻海特殊處理：強制有方向
+        if force_direction:
+            neg_keywords = ["破局","退出","延宕","裁員","停產","虧損"]
+            pos_keywords = ["合作","接單","成長","擴產","ai","併購"]
+            ltext = combined.lower()
+            if any(k in ltext for k in neg_keywords):
+                trend = "偏向下跌"
+            elif any(k in ltext for k in pos_keywords):
+                trend = "偏向上漲"
+            else:
+                trend = "偏向下跌"  # 保守
+
         return f"明天{target}股價走勢：{trend}\n原因：{short_reason}"
     except Exception as e:
         return f"[error] Groq 呼叫失敗：{e}"
 
 # ---------- 分析 ----------
-def analyze_target(db, news_col: str, target: str, result_col: str):
+def analyze_target(db, news_col: str, target: str, result_col: str, force_direction=False):
     pos, neg = load_tokens(db, TOKENS_COLLECTION)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     items = load_news_items(db, news_col, LOOKBACK_DAYS)
@@ -261,11 +278,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
     for t in terminal_logs[:MAX_DISPLAY_NEWS]:
         print(t)
 
-    if filtered:
-        summary = ollama_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target)
-    else:
-        summary = f"明天{target}股價走勢：不明確\n原因：近期新聞缺乏有效信號"
-
+    summary = ollama_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target, force_direction)
     print(summary)
 
     os.makedirs("result", exist_ok=True)
@@ -286,9 +299,11 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
 # ---------- 主程式 ----------
 def main():
     db = get_db()
+    # 台積電保持原邏輯
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
     print("\n" + "="*70 + "\n")
-    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
+    # 鴻海使用 force_direction=True
+    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
 
 if __name__ == "__main__":
     main()
