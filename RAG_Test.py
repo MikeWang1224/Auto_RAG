@@ -168,19 +168,39 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         if not sent.strip():
             continue
 
-        # ⚠️ 僅分析包含股票別名的句子
+        # ⚠️ 若句中不含股票別名，略過
         if not re.search(alias_pattern, sent):
             continue
 
-        for ttype, cre, w, note, patt in pos_c + neg_c:
-            key = (ttype, patt, sent)
-            if key in seen:
+        # ---- 找出所有股票名稱出現的位置 ----
+        alias_positions = []
+        for alias in target_aliases:
+            for m in re.finditer(re.escape(alias), sent):
+                alias_positions.append(m.start())
+        alias_positions.sort()
+
+        # ---- 對每個出現位置，取從該處到句尾的片段 ----
+        for pos in alias_positions:
+            segment = sent[pos:]
+            # 到下個標點為止
+            m = re.search(r'[。\.！!\?？；;，,]', segment)
+            if m:
+                segment = segment[:m.start()]
+            segment = segment.strip()
+
+            if not segment:
                 continue
-            matched = cre.search(sent) if ttype == "regex" else patt in sent
-            if matched:
-                score += w
-                hits.append((patt, w, note))
-                seen.add(key)
+
+            # ---- 在該片段中檢查 token 命中 ----
+            for ttype, cre, w, note, patt in pos_c + neg_c:
+                key = (ttype, patt, segment)
+                if key in seen:
+                    continue
+                matched = cre.search(segment) if ttype == "regex" else patt in segment
+                if matched:
+                    score += w
+                    hits.append((patt, w, note))
+                    seen.add(key)
 
     return MatchResult(score, hits)
 
