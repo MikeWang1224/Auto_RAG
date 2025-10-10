@@ -162,26 +162,36 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     if not re.search(alias_pattern, norm):
         return MatchResult(0.0, [])
 
-    # ---- 拆句分析 ----
-    sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm)
-    for sent in sentences:
-        if not sent.strip():
+    # ---- 段落分割 ----
+    paragraphs = re.split(r"(?:\n|\r|\s{2,})+", norm)
+    for para in paragraphs:
+        if not para.strip():
             continue
-        # ✅ 只分析「含股票名或別名」的句子
-        if not re.search(alias_pattern, sent):
+        # 若段落內沒有提到股票名，整段跳過
+        if not re.search(alias_pattern, para):
             continue
-        for ttype, cre, w, note, patt in pos_c + neg_c:
-            key = (ttype, patt, sent)
-            if key in seen:
+
+        sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', para)
+        seen_stock = False
+        for sent in sentences:
+            if not sent.strip():
                 continue
-            matched = cre.search(sent) if ttype == "regex" else patt in sent
-            if matched:
-                score += w
-                hits.append((patt, w, note))
-                seen.add(key)
+            if re.search(alias_pattern, sent):
+                seen_stock = True
+            # ✅ 若該句有股票名或同段落前面句子提過股票名 → 允許分析
+            if not seen_stock:
+                continue
+            for ttype, cre, w, note, patt in pos_c + neg_c:
+                key = (ttype, patt, sent)
+                if key in seen:
+                    continue
+                matched = cre.search(sent) if ttype == "regex" else patt in sent
+                if matched:
+                    score += w
+                    hits.append((patt, w, note))
+                    seen.add(key)
 
     return MatchResult(score, hits)
-
 
 # ---------- Groq ----------
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
