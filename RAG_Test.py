@@ -162,7 +162,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     if not re.search(alias_pattern, norm):
         return MatchResult(0.0, [])
 
-    # ---- 先按句子切分 ----
+    # ---- 按句子切分 ----
     sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm)
     for sent in sentences:
         sent = sent.strip()
@@ -177,15 +177,19 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         alias_positions = []
         for alias in target_aliases:
             for m in re.finditer(re.escape(alias), sent):
-                alias_positions.append((m.start(), m.end()))
+                alias_positions.append(m.start())
         alias_positions.sort()
 
-        # ---- 取股票名前後各 N 字當分析片段 ----
-        WINDOW = 12  # 可自行調整範圍大小
-        for start, end in alias_positions:
-            left = max(0, start - WINDOW)
-            right = min(len(sent), end + WINDOW)
-            segment = sent[left:right].strip()
+        # ---- 對每個出現位置，取股票名後面的句子片段 ----
+        for pos in alias_positions:
+            segment = sent[pos:]
+            # 到下一個標點或取固定長度
+            m = re.search(r'[。\.！!\?？；;，,]', segment)
+            if m:
+                segment = segment[:m.start()]
+            else:
+                segment = segment[:50]
+            segment = segment.strip()
 
             if not segment:
                 continue
@@ -202,8 +206,6 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
                     seen.add(key)
 
     return MatchResult(score, hits)
-
-
 
 # ---------- Groq ----------
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
