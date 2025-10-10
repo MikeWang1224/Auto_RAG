@@ -150,7 +150,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
 
-    # ---- 股票別名表 ----
+    # ---- 股票別名 ----
     aliases = {
         "台積電": ["台積電", "tsmc", "2330"],
         "鴻海": ["鴻海", "hon hai", "2317", "foxconn", "富士康"],
@@ -158,40 +158,32 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     target_aliases = [target.lower()] + aliases.get(target, [])
     alias_pattern = "|".join(re.escape(a.lower()) for a in target_aliases)
 
-    # ---- 若全文未出現任何別名，直接略過 ----
+    # ---- 若全文沒提該股票，跳過 ----
     if not re.search(alias_pattern, norm):
         return MatchResult(0.0, [])
 
-    # ---- 段落分割 ----
-    paragraphs = re.split(r"(?:\n|\r|\s{2,})+", norm)
-    for para in paragraphs:
-        if not para.strip():
-            continue
-        # 若段落內沒有提到股票名，整段跳過
-        if not re.search(alias_pattern, para):
+    # ---- 按句子切分 ----
+    sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm)
+    for sent in sentences:
+        if not sent.strip():
             continue
 
-        sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', para)
-        seen_stock = False
-        for sent in sentences:
-            if not sent.strip():
+        # ⚠️ 僅分析包含股票別名的句子
+        if not re.search(alias_pattern, sent):
+            continue
+
+        for ttype, cre, w, note, patt in pos_c + neg_c:
+            key = (ttype, patt, sent)
+            if key in seen:
                 continue
-            if re.search(alias_pattern, sent):
-                seen_stock = True
-            # ✅ 若該句有股票名或同段落前面句子提過股票名 → 允許分析
-            if not seen_stock:
-                continue
-            for ttype, cre, w, note, patt in pos_c + neg_c:
-                key = (ttype, patt, sent)
-                if key in seen:
-                    continue
-                matched = cre.search(sent) if ttype == "regex" else patt in sent
-                if matched:
-                    score += w
-                    hits.append((patt, w, note))
-                    seen.add(key)
+            matched = cre.search(sent) if ttype == "regex" else patt in sent
+            if matched:
+                score += w
+                hits.append((patt, w, note))
+                seen.add(key)
 
     return MatchResult(score, hits)
+
 
 # ---------- Groq ----------
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
