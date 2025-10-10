@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海）
-更新版：
-✅ 僅在句子中提及目標股票名稱時才進行 token 命中判斷，避免其他公司漲跌誤判。
-✅ 靜默模式、Groq 分析、Firebase 寫入邏輯保持不變。
+強化版：
+✅ 命中判定放寬（利多、合作、成長等字樣視為偏多）
+✅ 鴻海新聞特例：AI / 電動車 / 蘋果 / 伺服器 關聯自動視為利多
+✅ 原始 Firestore、Groq 流程不變
 """
 
 import os, signal, regex as re
@@ -33,14 +34,14 @@ TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "3.0"))
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))  # 預設兩天內新聞
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 STOP = False
 def _sigint_handler(signum, frame):
     global STOP
     STOP = True
-    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
+    print("\n[info] 偵測到 Ctrl+C，安全停止中…")
 signal.signal(signal.SIGINT, _sigint_handler)
 
 # ---------- 結構 ----------
@@ -145,17 +146,16 @@ def compile_tokens(tokens: List[Token]):
             out.append(("substr", None, w, t.note, t.pattern.lower()))
     return out
 
-# ✅ 改良版：只分析包含目標股票名的句子
+# ✅ 改良版：含寬鬆命中與鴻海特例
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
 
-    # ---- 股票別名 ----
     aliases = {
         "台積電": ["台積電", "tsmc", "2330"],
         "鴻海": ["鴻海", "hon hai", "2317", "foxconn", "富士康"],
     }
-    all_aliases = sum(aliases.values(), []) + ["台積電", "鴻海"]  # 全部公司別名
+    all_aliases = sum(aliases.values(), []) + ["台積電", "鴻海"]
     target_aliases = [target.lower()] + aliases.get(target, [])
     alias_pattern = "|".join(re.escape(a.lower()) for a in target_aliases)
     all_pattern = "|".join(re.escape(a.lower()) for a in all_aliases)
@@ -163,37 +163,29 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     if not re.search(alias_pattern, norm):
         return MatchResult(0.0, [])
 
-    # ---- 按句子切分 ----
     sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm)
     for sent in sentences:
         sent = sent.strip()
         if not sent:
             continue
-
-        # 找出句中所有公司名稱位置
         company_spans = []
         for comp in all_aliases:
             for m in re.finditer(re.escape(comp.lower()), sent):
                 company_spans.append((m.start(), comp.lower()))
         company_spans.sort()
-
         if not company_spans:
             continue
 
-        # 若句中只有目標公司
+        to_check = []
         if len(company_spans) == 1 and re.search(alias_pattern, sent):
-            segment = sent
-            to_check = [segment]
+            to_check = [sent]
         else:
-            # 多公司時分段
-            to_check = []
             for i, (pos, name) in enumerate(company_spans):
                 next_pos = company_spans[i + 1][0] if i + 1 < len(company_spans) else len(sent)
                 segment = sent[pos:next_pos]
                 if re.search(alias_pattern, segment):
                     to_check.append(segment)
 
-        # ---- 對每個屬於目標公司的區段進行 token 檢查 ----
         for segment in to_check:
             for ttype, cre, w, note, patt in pos_c + neg_c:
                 key = (ttype, patt, segment)
@@ -205,8 +197,20 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
                     hits.append((patt, w, note))
                     seen.add(key)
 
-    return MatchResult(score, hits)
+    # ✅ 寬鬆判定邏輯
+    positive_hint = any(x in norm for x in ["成長", "利多", "合作", "擴產", "超標", "強勢", "創高"])
+    negative_hint = any(x in norm for x in ["衰退", "利空", "減產", "下滑", "疲弱", "裁員"])
+    if score < SCORE_THRESHOLD and positive_hint:
+        score += 2.0
+    if score > -SCORE_THRESHOLD and negative_hint:
+        score -= 2.0
 
+    # ✅ 鴻海特例（AI / 電動車 / 蘋果 / 伺服器）
+    if target == "鴻海":
+        if any(x in norm for x in ["蘋果", "ai", "電動車", "伺服器", "增產"]):
+            score += 3.0
+
+    return MatchResult(score, hits)
 
 # ---------- Groq ----------
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -249,7 +253,7 @@ def ollama_analyze(texts: List[str], target: str) -> str:
     except Exception as e:
         return f"[error] Groq 呼叫失敗：{e}"
 
-# ---------- 分析通用函數 ----------
+# ---------- 分析 ----------
 def analyze_target(db, news_col: str, target: str, result_col: str):
     pos, neg = load_tokens(db, TOKENS_COLLECTION)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
@@ -266,7 +270,6 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
             filtered.append((it, res))
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
             hits_text_lines = [f"  {'+' if w>0 else '-'} {patt}（{note}）" for patt, w, note in res.hits]
-            local_log.append(f"[{it['id']}] {it.get('title','')}\n{trend}\n命中：\n" + "\n".join(hits_text_lines))
             truncated_title = first_n_sentences(it.get("title",""), 3)
             terminal_logs.append(f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n")
 
@@ -279,9 +282,9 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
     os.makedirs("result", exist_ok=True)
     local_path = f"result/{target}_{datetime.now(TAIWAN_TZ).strftime('%Y%m%d_%H%M%S')}.txt"
     with open(local_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(local_log))
-        f.write("\n" + "="*60 + "\n")
-        f.write(summary + "\n")
+        for t in terminal_logs:
+            f.write(t + "\n")
+        f.write("="*60 + "\n" + summary + "\n")
 
     try:
         db.collection(result_col).document(datetime.now(TAIWAN_TZ).strftime("%Y%m%d")).set({
@@ -289,7 +292,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
             "result": summary,
         })
     except Exception as e:
-        log(f"[error] 寫入 Firebase 失敗：{e}")
+        log(f"[error] Firebase 寫入失敗：{e}")
 
 # ---------- 主程式 ----------
 def main():
