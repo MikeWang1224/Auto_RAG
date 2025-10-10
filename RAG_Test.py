@@ -149,10 +149,26 @@ def compile_tokens(tokens: List[Token]):
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
-    sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm) if target else [norm]
 
+    # ---- 股票別名表 ----
+    aliases = {
+        "台積電": ["台積電", "tsmc", "2330"],
+        "鴻海": ["鴻海", "hon hai", "2317", "foxconn", "富士康"],
+    }
+    target_aliases = [target.lower()] + aliases.get(target, [])
+    alias_pattern = "|".join(re.escape(a.lower()) for a in target_aliases)
+
+    # ---- 若全文未出現任何別名，直接略過 ----
+    if not re.search(alias_pattern, norm):
+        return MatchResult(0.0, [])
+
+    # ---- 拆句分析 ----
+    sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm)
     for sent in sentences:
-        if target and target.lower() not in sent:
+        if not sent.strip():
+            continue
+        # ✅ 只分析「含股票名或別名」的句子
+        if not re.search(alias_pattern, sent):
             continue
         for ttype, cre, w, note, patt in pos_c + neg_c:
             key = (ttype, patt, sent)
@@ -163,7 +179,9 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
                 score += w
                 hits.append((patt, w, note))
                 seen.add(key)
+
     return MatchResult(score, hits)
+
 
 # ---------- Groq ----------
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
