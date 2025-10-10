@@ -149,7 +149,7 @@ def compile_tokens(tokens: List[Token]):
 # ✅ 改良版：只分析包含目標股票名的句子
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
-    score, hits, seen = 0.0, [], set()
+    score, hits, seen_keys = 0.0, [], set()
 
     aliases = {
         "台積電": ["台積電", "tsmc", "2330"],
@@ -167,6 +167,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         sent = sent.strip()
         if not sent:
             continue
+
         company_spans = []
         for comp in all_aliases:
             for m in re.finditer(re.escape(comp.lower()), sent):
@@ -174,26 +175,29 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         company_spans.sort()
         if not company_spans:
             continue
+
         if len(company_spans) == 1 and re.search(alias_pattern, sent):
-            to_check = [sent]
+            segments = [sent]
         else:
-            to_check = []
+            segments = []
             for i, (pos, name) in enumerate(company_spans):
                 next_pos = company_spans[i + 1][0] if i + 1 < len(company_spans) else len(sent)
                 segment = sent[pos:next_pos]
                 if re.search(alias_pattern, segment):
-                    to_check.append(segment)
+                    segments.append(segment)
 
-        for segment in to_check:
+        # ✅ 過濾重複 token
+        for segment in segments:
             for ttype, cre, w, note, patt in pos_c + neg_c:
-                key = (ttype, patt, segment)
-                if key in seen:
+                key = (patt, note)  # 只用 pattern + note 判斷重複
+                if key in seen_keys:
                     continue
                 matched = cre.search(segment) if ttype == "regex" else patt in segment
                 if matched:
                     score += w
                     hits.append((patt, w, note))
-                    seen.add(key)
+                    seen_keys.add(key)
+
     return MatchResult(score, hits)
 
 # ---------- Groq ----------
