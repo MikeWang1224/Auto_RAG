@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海）
-靜默模式：不顯示多餘訊息，只輸出前五則命中新聞與 Groq 結果。
+更新版：
+✅ 僅在句子中提及目標股票名稱時才進行 token 命中判斷，避免其他公司漲跌誤判。
+✅ 靜默模式、Groq 分析、Firebase 寫入邏輯保持不變。
 """
-
 
 import os, signal, regex as re
 from dataclasses import dataclass
@@ -14,8 +15,8 @@ from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 設定 ----------
-SILENT_MODE = True        # ✅ 完全靜默模式
-MAX_DISPLAY_NEWS = 5      # ✅ 終端最多顯示前 5 則新聞
+SILENT_MODE = True
+MAX_DISPLAY_NEWS = 5
 
 def log(msg: str):
     if not SILENT_MODE:
@@ -32,7 +33,7 @@ TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "3.0"))
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))  # 預設兩天內新聞
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 STOP = False
@@ -144,18 +145,24 @@ def compile_tokens(tokens: List[Token]):
             out.append(("substr", None, w, t.note, t.pattern.lower()))
     return out
 
-def score_text(text: str, pos_c, neg_c) -> MatchResult:
+# ✅ 改良版：只分析包含目標股票名的句子
+def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
-    for ttype, cre, w, note, patt in pos_c + neg_c:
-        key = (ttype, patt)
-        if key in seen:
+    sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm) if target else [norm]
+
+    for sent in sentences:
+        if target and target.lower() not in sent:
             continue
-        matched = cre.search(norm) if ttype == "regex" else patt in norm
-        if matched:
-            score += w
-            hits.append((patt, w, note))
-            seen.add(key)
+        for ttype, cre, w, note, patt in pos_c + neg_c:
+            key = (ttype, patt, sent)
+            if key in seen:
+                continue
+            matched = cre.search(sent) if ttype == "regex" else patt in sent
+            if matched:
+                score += w
+                hits.append((patt, w, note))
+                seen.add(key)
     return MatchResult(score, hits)
 
 # ---------- Groq ----------
@@ -211,7 +218,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
     for it in items:
         if STOP:
             break
-        res = score_text(it.get("content") or it.get("title") or "", pos_c, neg_c)
+        res = score_text(it.get("content") or it.get("title") or "", pos_c, neg_c, target)
         if abs(res.score) >= SCORE_THRESHOLD:
             filtered.append((it, res))
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
@@ -220,7 +227,6 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
             truncated_title = first_n_sentences(it.get("title",""), 3)
             terminal_logs.append(f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n")
 
-    # --- 只顯示前五則 ---
     for t in terminal_logs[:MAX_DISPLAY_NEWS]:
         print(t)
 
@@ -246,7 +252,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str):
 def main():
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
-    print("\n" + "="*70 + "\n")   # ✅ 分隔線（台積電 ↔ 鴻海）
+    print("\n" + "="*70 + "\n")
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
 
 if __name__ == "__main__":
