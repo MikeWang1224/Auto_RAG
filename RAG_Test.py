@@ -162,36 +162,35 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     if not re.search(alias_pattern, norm):
         return MatchResult(0.0, [])
 
-    # ---- 按句子切分 ----
+    # ---- 先按句子切分 ----
     sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm)
     for sent in sentences:
-        if not sent.strip():
+        sent = sent.strip()
+        if not sent:
             continue
 
         # ⚠️ 若句中不含股票別名，略過
         if not re.search(alias_pattern, sent):
             continue
 
-        # ---- 找出所有股票名稱出現的位置 ----
+        # ---- 找出股票名出現位置 ----
         alias_positions = []
         for alias in target_aliases:
             for m in re.finditer(re.escape(alias), sent):
-                alias_positions.append(m.start())
+                alias_positions.append((m.start(), m.end()))
         alias_positions.sort()
 
-        # ---- 對每個出現位置，取從該處到句尾的片段 ----
-        for pos in alias_positions:
-            segment = sent[pos:]
-            # 到下個標點為止
-            m = re.search(r'[。\.！!\?？；;，,]', segment)
-            if m:
-                segment = segment[:m.start()]
-            segment = segment.strip()
+        # ---- 取股票名前後各 N 字當分析片段 ----
+        WINDOW = 12  # 可自行調整範圍大小
+        for start, end in alias_positions:
+            left = max(0, start - WINDOW)
+            right = min(len(sent), end + WINDOW)
+            segment = sent[left:right].strip()
 
             if not segment:
                 continue
 
-            # ---- 在該片段中檢查 token 命中 ----
+            # ---- 分析該片段 ----
             for ttype, cre, w, note, patt in pos_c + neg_c:
                 key = (ttype, patt, segment)
                 if key in seen:
@@ -203,6 +202,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
                     seen.add(key)
 
     return MatchResult(score, hits)
+
 
 
 # ---------- Groq ----------
