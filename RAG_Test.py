@@ -155,10 +155,11 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         "台積電": ["台積電", "tsmc", "2330"],
         "鴻海": ["鴻海", "hon hai", "2317", "foxconn", "富士康"],
     }
+    all_aliases = sum(aliases.values(), []) + ["台積電", "鴻海"]  # 全部公司別名
     target_aliases = [target.lower()] + aliases.get(target, [])
     alias_pattern = "|".join(re.escape(a.lower()) for a in target_aliases)
+    all_pattern = "|".join(re.escape(a.lower()) for a in all_aliases)
 
-    # ---- 若全文沒提該股票，跳過 ----
     if not re.search(alias_pattern, norm):
         return MatchResult(0.0, [])
 
@@ -169,32 +170,31 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         if not sent:
             continue
 
-        # ⚠️ 若句中不含股票別名，略過
-        if not re.search(alias_pattern, sent):
+        # 找出句中所有公司名稱位置
+        company_spans = []
+        for comp in all_aliases:
+            for m in re.finditer(re.escape(comp.lower()), sent):
+                company_spans.append((m.start(), comp.lower()))
+        company_spans.sort()
+
+        if not company_spans:
             continue
 
-        # ---- 找出股票名出現位置 ----
-        alias_positions = []
-        for alias in target_aliases:
-            for m in re.finditer(re.escape(alias), sent):
-                alias_positions.append(m.start())
-        alias_positions.sort()
+        # 若句中只有目標公司
+        if len(company_spans) == 1 and re.search(alias_pattern, sent):
+            segment = sent
+            to_check = [segment]
+        else:
+            # 多公司時分段
+            to_check = []
+            for i, (pos, name) in enumerate(company_spans):
+                next_pos = company_spans[i + 1][0] if i + 1 < len(company_spans) else len(sent)
+                segment = sent[pos:next_pos]
+                if re.search(alias_pattern, segment):
+                    to_check.append(segment)
 
-        # ---- 對每個出現位置，取股票名後面的句子片段 ----
-        for pos in alias_positions:
-            segment = sent[pos:]
-            # 到下一個標點或取固定長度
-            m = re.search(r'[。\.！!\?？；;，,]', segment)
-            if m:
-                segment = segment[:m.start()]
-            else:
-                segment = segment[:50]
-            segment = segment.strip()
-
-            if not segment:
-                continue
-
-            # ---- 分析該片段 ----
+        # ---- 對每個屬於目標公司的區段進行 token 檢查 ----
+        for segment in to_check:
             for ttype, cre, w, note, patt in pos_c + neg_c:
                 key = (ttype, patt, segment)
                 if key in seen:
@@ -206,6 +206,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
                     seen.add(key)
 
     return MatchResult(score, hits)
+
 
 # ---------- Groq ----------
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
