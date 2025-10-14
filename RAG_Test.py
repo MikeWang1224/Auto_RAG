@@ -6,7 +6,7 @@
 ✅ parse_docid_time() 加入 .strip()，避免空白導致解析失敗
 ✅ LOOKBACK_DAYS 改為 5（可調）
 ✅ SCORE_THRESHOLD 降為 0.5 方便測試
-✅ 新增 debug print 顯示實際抓到新聞數
+✅ 新增過濾關鍵字、乾淨輸出
 """
 
 import os, signal, regex as re
@@ -36,8 +36,8 @@ TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.5"))  # 降低門檻方便測試
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "5"))           # 擴增為5天
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.5"))
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "5"))
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 STOP = False
@@ -83,7 +83,7 @@ def first_n_sentences(text: str, n: int = 3) -> str:
     return joined
 
 def parse_docid_time(doc_id: str):
-    doc_id = (doc_id or "").strip()  # ✅ 防止空白造成 match 失敗
+    doc_id = (doc_id or "").strip()
     m = DOCID_RE.match(doc_id)
     if not m:
         return None
@@ -113,7 +113,6 @@ def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
         (pos if pol == "positive" else neg).append(Token(pol, ttype, patt, w, note))
     return pos, neg
 
-# ✅ 放寬條件版本：支援所有 key，只要 value 是 dict
 def load_news_items(db, col_name: str, days: int) -> List[Dict]:
     items, seen = [], set()
     now = datetime.now(TAIWAN_TZ)
@@ -152,7 +151,6 @@ def compile_tokens(tokens: List[Token]):
             out.append(("substr", None, w, t.note, t.pattern.lower()))
     return out
 
-# ✅ 只分析包含目標股票名的句子
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen_keys = 0.0, [], set()
@@ -259,14 +257,17 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     items = load_news_items(db, news_col, LOOKBACK_DAYS)
 
-    print(f"[debug] {target} 抓到 {len(items)} 則新聞")  # ✅ debug
-    for it in items[:3]:
-        print(f"  - {it['id']} {shorten_text(it['title'], 50)}")
+    # 過濾不想要的新聞
+    exclude_keywords = ["intel", "輝達", "nvidia", "日月光"]
+    items = [
+        it for it in items
+        if not any(k.lower() in ((it.get("title") or "") + " " + (it.get("content") or "")).lower() for k in exclude_keywords)
+    ]
 
     if not items:
         return
 
-    filtered, local_log, terminal_logs = [], [], []
+    filtered, terminal_logs = [], []
     for it in items:
         if STOP:
             break
@@ -275,7 +276,6 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
             filtered.append((it, res))
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
             hits_text_lines = [f"  {'+' if w>0 else '-'} {patt}（{note}）" for patt, w, note in res.hits]
-            local_log.append(f"[{it['id']}] {it.get('title','')}\n{trend}\n命中：\n" + "\n".join(hits_text_lines))
             truncated_title = first_n_sentences(it.get("title",""), 3)
             terminal_logs.append(f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n")
 
@@ -288,7 +288,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
     os.makedirs("result", exist_ok=True)
     local_path = f"result/{target}_{datetime.now(TAIWAN_TZ).strftime('%Y%m%d_%H%M%S')}.txt"
     with open(local_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(local_log))
+        f.write("\n".join(terminal_logs))
         f.write("\n" + "="*60 + "\n")
         f.write(summary + "\n")
 
