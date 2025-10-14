@@ -108,16 +108,16 @@ def analyze_target(db, source_collection, company_name, result_collection, force
 def main():
     db = get_db()
 
-    # 台積電分析（標準）
-    analyze_target(db, "NEWS", "台積電", "Groq_result")
+    # 台積電分析（一般模式）
+    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
     print("\n" + "="*70 + "\n")
 
     # 鴻海分析（強制方向）
-    analyze_target(db, "NEWS_Foxxcon", "鴻海", "Groq_result_Foxxcon", force_direction=True)
+    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
     print("\n" + "="*70 + "\n")
 
-    # 聯電分析（與台積電相同）
-    analyze_target(db, "NEWS_UMC", "聯電", "Groq_result_UMC")
+    # 聯電分析（同鴻海邏輯 → 強制方向）
+    analyze_target(db, "NEWS_UMC", "聯電", "Groq_result_UMC", force_direction=True)
 
 # ------------------------------------------------------------
 if __name__ == "__main__":
