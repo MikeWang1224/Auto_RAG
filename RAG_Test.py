@@ -315,7 +315,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
 # ---------- 主程式 ----------
 def main():
     db = get_db()
-    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result_TSMC")  # 改名
+    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")  # 改名
     print("\n" + "="*70 + "\n")
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
     print("\n" + "="*70 + "\n")
