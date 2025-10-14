@@ -7,6 +7,7 @@
 ✅ LOOKBACK_DAYS 改為 5（可調）
 ✅ SCORE_THRESHOLD 降為 0.5 方便測試
 ✅ 新增過濾關鍵字、乾淨輸出
+✅ 股價走勢結果自動加符號（上漲🔼、下跌🔽、不明確⚠️）
 """
 
 import os, signal, regex as re
@@ -29,7 +30,7 @@ def log(msg: str):
 if os.path.exists(".env"):
     load_dotenv(".env", override=True)
 else:
-    load_dotenv(override=True)
+    load_dotenv(".env", override=True)
 
 # ---------- 常數 ----------
 TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
@@ -230,24 +231,35 @@ def ollama_analyze(texts: List[str], target: str, force_direction: bool = False)
         raw = resp.choices[0].message.content.strip()
         cleaned = re.sub(r"^```(?:\w+)?|```$", "", raw).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
+
+        # 取得趨勢
         m_trend = re.search(r"(上漲|下跌|不明確)", cleaned)
         trend = m_trend.group(1) if m_trend else "不明確"
+
+        # 加符號
+        symbol_map = {"上漲": "🔼", "下跌": "🔽", "不明確": "⚠️"}
+        trend_with_symbol = f"{trend} {symbol_map.get(trend, '')}"
+
+        # 原因簡化
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", cleaned)
         reason_text = m_reason.group(1) if m_reason else cleaned
         sentences = re.split(r"[。.!！；;]", reason_text)
         short_reason = "，".join(sentences[:2]).strip()
         short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
+
         if force_direction:
             neg_keywords = ["破局","退出","延宕","裁員","停產","虧損"]
             pos_keywords = ["合作","接單","成長","擴產","ai","併購"]
             ltext = combined.lower()
             if any(k in ltext for k in neg_keywords):
-                trend = "偏向下跌"
+                trend_with_symbol = "偏向下跌 🔽"
             elif any(k in ltext for k in pos_keywords):
-                trend = "偏向上漲"
+                trend_with_symbol = "偏向上漲 🔼"
             else:
-                trend = "偏向下跌"
-        return f"明天{target}股價走勢：{trend}\n原因：{short_reason}"
+                trend_with_symbol = "偏向下跌 🔽"
+
+        return f"明天{target}股價走勢：{trend_with_symbol}\n原因：{short_reason}"
+
     except Exception as e:
         return f"[error] Groq 呼叫失敗：{e}"
 
@@ -311,4 +323,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
