@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-更新版：
-✅ 僅在句子中提及目標股票名稱時才進行 token 命中判斷。
-✅ 刪除內建 token，僅使用 Firebase token。
-✅ 鴻海永不出現「不明確」，平分時自動用關鍵字判斷方向。
-✅ 新增聯電（UMC）支援。
+修正版：
+✅ 聯電抓不到新聞問題修正（放寬 key 條件）
+✅ parse_docid_time() 加入 .strip()，避免空白導致解析失敗
+✅ LOOKBACK_DAYS 改為 5（可調）
+✅ SCORE_THRESHOLD 降為 0.5 方便測試
+✅ 新增 debug print 顯示實際抓到新聞數
 """
 
 import os, signal, regex as re
@@ -34,9 +35,9 @@ else:
 TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
-NEWS_COLLECTION_UMC = "NEWS_UMC"  # ✅ 新增
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "3.0"))
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))
+NEWS_COLLECTION_UMC = "NEWS_UMC"
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.5"))  # 降低門檻方便測試
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "5"))           # 擴增為5天
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 STOP = False
@@ -62,6 +63,7 @@ class MatchResult:
 
 # ---------- 工具 ----------
 DOCID_RE = re.compile(r"^(?P<ymd>\d{8})_(?P<hms>\d{6})$")
+
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
@@ -81,6 +83,7 @@ def first_n_sentences(text: str, n: int = 3) -> str:
     return joined
 
 def parse_docid_time(doc_id: str):
+    doc_id = (doc_id or "").strip()  # ✅ 防止空白造成 match 失敗
     m = DOCID_RE.match(doc_id)
     if not m:
         return None
@@ -110,6 +113,7 @@ def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
         (pos if pol == "positive" else neg).append(Token(pol, ttype, patt, w, note))
     return pos, neg
 
+# ✅ 放寬條件版本：支援所有 key，只要 value 是 dict
 def load_news_items(db, col_name: str, days: int) -> List[Dict]:
     items, seen = [], set()
     now = datetime.now(TAIWAN_TZ)
@@ -120,7 +124,7 @@ def load_news_items(db, col_name: str, days: int) -> List[Dict]:
             continue
         data = d.to_dict() or {}
         for k, v in data.items():
-            if not (k.startswith("news_") and isinstance(v, dict)):
+            if not isinstance(v, dict):
                 continue
             title, content = str(v.get("title") or ""), str(v.get("content") or "")
             if not title and not content:
@@ -148,7 +152,7 @@ def compile_tokens(tokens: List[Token]):
             out.append(("substr", None, w, t.note, t.pattern.lower()))
     return out
 
-# ✅ 改良版：只分析包含目標股票名的句子
+# ✅ 只分析包含目標股票名的句子
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen_keys = 0.0, [], set()
@@ -156,7 +160,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     aliases = {
         "台積電": ["台積電", "tsmc", "2330"],
         "鴻海": ["鴻海", "hon hai", "2317", "foxconn", "富士康"],
-        "聯電": ["聯電", "umc", "2303"],  # ✅ 新增
+        "聯電": ["聯電", "umc", "2303"],
     }
     all_aliases = sum(aliases.values(), []) + ["台積電", "鴻海", "聯電"]
     target_aliases = [target.lower()] + aliases.get(target, [])
@@ -170,7 +174,6 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         sent = sent.strip()
         if not sent:
             continue
-
         company_spans = []
         for comp in all_aliases:
             for m in re.finditer(re.escape(comp.lower()), sent):
@@ -178,7 +181,6 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         company_spans.sort()
         if not company_spans:
             continue
-
         if len(company_spans) == 1 and re.search(alias_pattern, sent):
             segments = [sent]
         else:
@@ -188,7 +190,6 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
                 segment = sent[pos:next_pos]
                 if re.search(alias_pattern, segment):
                     segments.append(segment)
-
         for segment in segments:
             for ttype, cre, w, note, patt in pos_c + neg_c:
                 key = (patt, note)
@@ -199,7 +200,6 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
                     score += w
                     hits.append((patt, w, note))
                     seen_keys.add(key)
-
     return MatchResult(score, hits)
 
 # ---------- Groq ----------
@@ -232,16 +232,13 @@ def ollama_analyze(texts: List[str], target: str, force_direction: bool = False)
         raw = resp.choices[0].message.content.strip()
         cleaned = re.sub(r"^```(?:\w+)?|```$", "", raw).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
-
         m_trend = re.search(r"(上漲|下跌|不明確)", cleaned)
         trend = m_trend.group(1) if m_trend else "不明確"
-
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", cleaned)
         reason_text = m_reason.group(1) if m_reason else cleaned
         sentences = re.split(r"[。.!！；;]", reason_text)
         short_reason = "，".join(sentences[:2]).strip()
         short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
-
         if force_direction:
             neg_keywords = ["破局","退出","延宕","裁員","停產","虧損"]
             pos_keywords = ["合作","接單","成長","擴產","ai","併購"]
@@ -252,7 +249,6 @@ def ollama_analyze(texts: List[str], target: str, force_direction: bool = False)
                 trend = "偏向上漲"
             else:
                 trend = "偏向下跌"
-
         return f"明天{target}股價走勢：{trend}\n原因：{short_reason}"
     except Exception as e:
         return f"[error] Groq 呼叫失敗：{e}"
@@ -262,6 +258,11 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
     pos, neg = load_tokens(db, TOKENS_COLLECTION)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     items = load_news_items(db, news_col, LOOKBACK_DAYS)
+
+    print(f"[debug] {target} 抓到 {len(items)} 則新聞")  # ✅ debug
+    for it in items[:3]:
+        print(f"  - {it['id']} {shorten_text(it['title'], 50)}")
+
     if not items:
         return
 
@@ -306,7 +307,7 @@ def main():
     print("\n" + "="*70 + "\n")
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
     print("\n" + "="*70 + "\n")
-    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")  # ✅ 新增聯電分析
+    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
 
 if __name__ == "__main__":
     main()
