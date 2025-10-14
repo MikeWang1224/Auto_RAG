@@ -1,124 +1,79 @@
 # -*- coding: utf-8 -*-
-"""
-股票新聞分析工具（完整 RAG + Groq 簡潔分析 + Firestore 回傳結果）
-版本：台積電 + 鴻海 + 聯電
-"""
-
 import os
-import time
 import json
-import warnings
 from datetime import datetime
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 import firebase_admin
 from firebase_admin import credentials, firestore
-import requests
+from groq import Groq
 
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+# ------------------ 初始化 Firebase ------------------ #
+key_dict = json.loads(os.environ["NEWS"])
+cred = credentials.Certificate(key_dict)
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
-# ------------------------------------------------------------
-# 🔧 Firestore 初始化
-# ------------------------------------------------------------
-def get_db():
-    if not firebase_admin._apps:
-        cred = credentials.Certificate("gcp-key.json")
-        firebase_admin.initialize_app(cred)
-    return firestore.client()
+# ------------------ 初始化 Groq ------------------ #
+groq_api_key = os.environ["GROQ_API_KEY"]
+client = Groq(api_key=groq_api_key)
 
-# ------------------------------------------------------------
-# 🔍 Groq API 分析邏輯（文字傾向分析）
-# ------------------------------------------------------------
-def analyze_with_groq(news_list, company_name):
-    """呼叫 Groq API 分析新聞方向"""
-    if not news_list:
-        return f"⚠️ {company_name} 無可分析的新聞"
-
-    joined_text = "\n".join(news_list)
+# ------------------ Groq 分析 ------------------ #
+def analyze_text_with_groq(text):
     prompt = f"""
-你是一個財經分析AI，請根據以下新聞內容，判斷對「{company_name}」股價的未來一天走勢方向。
-請只輸出一行結果（上漲、下跌、不明確），不要加解釋：
+你是一位股票新聞分析師。以下是關於聯電的最新新聞：
+{text}
 
-新聞內容如下：
-{joined_text}
+請你綜合判斷，明天聯電股價的傾向為：
+- 上漲
+- 下跌
+- 持平
+
+請只輸出最有可能的一種情況。
 """
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"
-    }
+    completion = client.chat.completions.create(
+        model="llama-3.1-70b-versatile",
+        messages=[
+            {"role": "system", "content": "你是一位專業的金融分析師"},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return completion.choices[0].message.content.strip()
 
-    data = {
-        "model": "llama3-70b-8192",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-    }
+# ------------------ Firestore 分析與儲存 ------------------ #
+def analyze_firestore_news(collection_in, collection_out, stock_name):
+    print(f"\n📊 分析 {stock_name} 新聞...")
 
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        result = response.json()
-        answer = result["choices"][0]["message"]["content"].strip()
-        return answer
-    except Exception as e:
-        return f"分析失敗：{e}"
-
-# ------------------------------------------------------------
-# 📘 Firestore 分析流程
-# ------------------------------------------------------------
-def analyze_target(db, source_collection, company_name, result_collection, force_direction=False):
-    """抓取新聞並送 Groq 分析後，將結果寫回 Firestore"""
-    print(f"🚀 開始分析：{company_name}")
-
-    docs = db.collection(source_collection).stream()
-    news_list = []
-    for doc in docs:
-        data = doc.to_dict()
-        title = data.get("title", "")
-        content = data.get("content", "")
-        full_text = f"{title}\n{content}".strip()
-        if full_text:
-            news_list.append(full_text)
-
-    print(f"📄 共收集 {len(news_list)} 篇新聞")
-
-    if not news_list:
-        print(f"⚠️ {company_name} 沒有新聞可分析")
+    docs = list(db.collection(collection_in).stream())
+    if not docs:
+        print(f"⚠️ 找不到 {collection_in} 資料")
         return
 
-    # 呼叫 Groq
-    result = analyze_with_groq(news_list, company_name)
-    print(f"🔍 分析結果：{result}")
+    # 取最新一份新聞文件
+    latest_doc = sorted(docs, key=lambda d: d.id, reverse=True)[0]
+    news_data = latest_doc.to_dict()
+    all_text = "\n\n".join([item["title"] + "\n" + item["content"] for item in news_data.values()])
 
-    # 若 force_direction=True，避免出現「不明確」
-    if force_direction and "不明確" in result:
-        result = result.replace("不明確", "中性或略為上漲")
+    print(f"📰 共彙整 {len(news_data)} 則新聞進行分析...")
 
-    # 寫入 Firestore
-    today_str = datetime.now().strftime("%Y%m%d")
-    result_ref = db.collection(result_collection).document(today_str)
-    result_ref.set({
-        "date": today_str,
+    result = analyze_text_with_groq(all_text)
+    timestamp = datetime.now().strftime("%Y%m%d")
+
+    db.collection(collection_out).document(timestamp).set({
         "result": result,
-        "timestamp": firestore.SERVER_TIMESTAMP
+        "source_doc": latest_doc.id,
+        "stock": stock_name,
+        "analyzed_at": datetime.now().isoformat()
     })
-    print(f"✅ 已儲存至 Firestore：{result_collection}/{today_str}")
 
-# ------------------------------------------------------------
-# 🧭 主程式
-# ------------------------------------------------------------
-def main():
-    db = get_db()
+    print(f"✅ 已儲存 {stock_name} 分析結果至 {collection_out}/{timestamp}")
+    print(f"📈 結論：{result}")
 
-    # 台積電分析（一般模式）
-    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
-    print("\n" + "="*70 + "\n")
-
-    # 鴻海分析（強制方向）
-    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
-    print("\n" + "="*70 + "\n")
-
-    # 聯電分析（同鴻海邏輯 → 強制方向）
-    analyze_target(db, "NEWS_UMC", "聯電", "Groq_result_UMC", force_direction=True)
-
-# ------------------------------------------------------------
+# ------------------ 主程式 ------------------ #
 if __name__ == "__main__":
-    main()
+    # 台積電（一般分析）
+    analyze_firestore_news("NEWS", "Groq_result", "台積電")
+
+    # 鴻海（強制方向分析）
+    analyze_firestore_news("NEWS_Foxxcon", "Groq_result_Foxxcon", "鴻海")
+
+    # 聯電（同鴻海邏輯）
+    analyze_firestore_news("NEWS_UMC", "Groq_result_UMC", "聯電")
