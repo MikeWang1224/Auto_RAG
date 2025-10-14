@@ -1,35 +1,194 @@
-[20251013_064414#news_11]
-標題：焦點股》台積電：失守1400大關 市值日縮水逾1兆元...
-❌ 明日可能下跌
-命中：
-  - 暴跌（劇烈下跌）
-  - 大跌（整體大跌）
+🔎 開始分析 台積電 (NEWS) ...
+[debug] 🔍 正在讀取 Firestore 集合：NEWS
+[debug] → 文件 20250619_144126 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250620_064436 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250621_064105 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250622_064227 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250623_064726 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250624_064550 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250625_064558 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250626_064558 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250627_064513 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250628_064137 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250629_064241 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250630_064625 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250701_064616 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250702_064530 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250703_064551 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250704_064558 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250705_064206 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250706_064257 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250707_064706 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250708_064609 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250709_064644 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250710_064640 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250711_064624 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250712_064414 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250713_064358 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250714_064858 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250715_064802 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250716_064800 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250717_064813 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250718_065004 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250719_064439 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250720_064427 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250721_064900 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250722_064838 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250723_064934 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250724_064849 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250725_064932 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250726_064530 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250727_064632 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250728_065124 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250729_064951 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250730_065140 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250731_065005 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250801_065139 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250802_064524 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250803_064600 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250804_065522 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250805_065147 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250806_065204 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250807_065128 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250808_065134 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250809_064509 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250810_064453 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250811_065046 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250812_064718 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250813_064717 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250814_064729 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250815_064632 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250816_064323 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250817_064413 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250818_064928 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250819_064442 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250904_063847 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250905_063939 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250906_063503 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250907_063601 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250908_064210 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250909_064037 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250910_063919 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250911_064006 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250912_063918 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250913_063440 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250914_063629 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250915_064306 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250916_064018 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250917_064044 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250918_064014 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250919_063931 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250920_063701 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250921_063729 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250922_064330 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250923_064029 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250924_064000 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250925_064142 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250926_063953 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250927_063528 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20250928_063703 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250929_064335 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20250930_064150 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251001_064101 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251002_063923 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20251003_063858 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251004_063605 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251005_063616 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251006_064117 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251007_064026 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20251008_064041 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251009_064229 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251009_065616 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20251009_070416 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251010_064110 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251011_063555 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_9', 'news_1', 'news_2', 'news_6', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20251012_063623 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_8', 'news_7']
+[debug] → 文件 20251013_064414 keys=['news_13', 'news_14', 'news_10', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20251014_063102 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_5', 'news_12', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] → 文件 20251014_064046 keys=['news_10', 'news_14', 'news_13', 'news_11', 'news_3', 'news_6', 'news_1', 'news_2', 'news_9', 'news_12', 'news_5', 'news_4', 'news_15', 'news_7', 'news_8']
+[debug] ✅ 共載入 27 篇新聞
 
-[20251013_064414#news_15]
-標題：月減恐慌蛙出來戰！「這檔記憶體」營收年增157%..
-✅ 明日可能大漲
-命中：
-  + 合作（與他廠合作）
-  + 突破（技術面突破）
-  + 強勢（多頭強勢）
-  + 漲停（當日漲停）
-
-明天台積電股價走勢：下跌
-原因：美中貿易戰火再度升溫，衝擊台積電ADR暴跌6，41％，導致台股半導體類股跌幅逾3
+[HIT] AI 存儲需求激發 HDD 替代效應，NAND Flash 供應商加速轉進大容量近線 SSD (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 從 EUV 到光罩新技術，看蔡司半導體如何與台灣共創晶片未來 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] AI 存儲需求激發 HDD 替代效應，NAND Flash 供應商加速轉進大容量近線 SSD (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 韓國記憶體雙雄搶進 OpenAI，三星、SK 海力士股價齊揚！日本半導體如何應對「Stargate 效應」？ (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] Intel 與三星代工入生態系，輝達推 Vera Rubin 架構高效率百萬瓩級 AI 工廠 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 日月光集團西門子合作，為 ASE VIPack 先進封裝平台開發 3Dblox 工作流程 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 2025 OCP 高峰會》英特爾與三星代工入生態系，輝達推 Vera Rubin 架構高效率百萬瓩級 AI 工廠 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 2025 OCP 高峰會》輝達發表新世代 AI 資料中心與 OCP 藍圖，將大幅提高效率降低成本 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 【觀點】台積電、聯發科、台達電都搶拿的綠色通行證：台灣電子業如何靠「ESG溢價」突圍關稅戰？ (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 焦點股》台積電：1460元新天價 市值攀新高 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 台積電、0050夯！證交所第三季定期定額破181億 史上第二高 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 台積電.0050大漲 哆啦王:台股持有比重不要超過股市部位20% (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 記憶體下車！三大法人重砍這檔「指標股」6.4萬張 台積電、鴻海都淪為提款機 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 焦點股》台積電：失守1400大關 市值日縮水逾1兆元 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 荷蘭政府介入安世半導體，憂技術流向中國母企聞泰科技 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 英特爾全面投產 Intel 18A 製程，新架構涵蓋客戶端與伺服器市場兌現承諾 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 麥肯錫報告：中國稀土管制影響德國百萬就業人口 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] OpenAI 星際之門記憶體晶圓需求每月達 90 萬片，AI 撼動傳統記憶體生態 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 英特爾全面投產 Intel 18A 製程，新架構涵蓋客戶端與伺服器市場兌現承諾 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 月減恐慌蛙出來戰！「這檔記憶體」營收年增157%...被列處置股仍登強勢股王 台積電、緯創也入榜 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 4 奈米製程加持，AMD Ryzen 嵌入式 9000 系列為工業客戶帶來效能及效率 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+[HIT] 2026 年 CSP 資本支出上看 5,200 億美元，GPU 採購與 ASIC 研發助續創新高 (4.0) -> ['命中關鍵詞，與 台積電 相關']
+✅ 共 22 篇與 台積電 相關的新聞。
 
 ======================================================================
 
-[20251013_064414#news_2]
-標題：鴻海、Nissan聯手破局！鴻海不耐談判進度延宕 日媒：9月已確定退出...
-❌ 明日可能下跌
-命中：
-  - 破局（合作失敗）
-  - 退出（終止合作）
+🔎 開始分析 鴻海 (NEWS_Foxxcon) ...
+[debug] 🔍 正在讀取 Firestore 集合：NEWS_Foxxcon
+[debug] → 文件 20251009_065616 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_7', 'news_8', 'news_3', 'news_6']
+[debug] → 文件 20251009_070417 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_7', 'news_8', 'news_3', 'news_6']
+[debug] → 文件 20251010_064110 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_7', 'news_8', 'news_3', 'news_6']
+[debug] → 文件 20251011_063555 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_8', 'news_7', 'news_3', 'news_6']
+[debug] → 文件 20251012_063624 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_8', 'news_7', 'news_3', 'news_6']
+[debug] → 文件 20251013_064414 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_8', 'news_7', 'news_3', 'news_6']
+[debug] → 文件 20251014_063102 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_8', 'news_7', 'news_3', 'news_6']
+[debug] → 文件 20251014_064047 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_8', 'news_7', 'news_3', 'news_6']
+[debug] ✅ 共載入 11 篇新聞
 
-明天鴻海股價走勢：偏向下跌
-原因：鴻海收購日產追濱工廠的談判破局，股價受影響
+[HIT] 鴻海老臣戴正吳狀告郭台銘、鴻海 堅持傳喚郭 法官無奈：他不一定來 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 台股開高走低！電子領跌大盤收26793點 台積電漲10元 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 鴻海、輝達攜手 高雄導入800 VDC電力架構 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 台積電力守1400元 (圖) (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 鴻海、Nissan聯手破局！鴻海不耐談判進度延宕 日媒：9月已確定退出 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 台積電上漲25元開高！台股一度飆近400點 鴻海、廣達卻慘翻黑 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 鴻海、Nissan聯手破局！ 日媒爆內幕「與高層流言有關」 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 焦點股》鴻海：開盤重挫 低接買盤強勁 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 台股慘迎黑色星期一！外資趁亂先賣台積電、鴻海「另有8檔也成賣超箭靶」3檔ETF也躺著也中槍 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 黃仁勳出手投資了！跌破眼鏡聯手馬斯克這公司 鴻海、緯創等「5台供應鏈」爽受惠 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+[HIT] 鴻海、京鼎9月營收都創歷史新高 鴻準月營收連11個月倍數成長 (4.0) -> ['命中關鍵詞，與 鴻海 相關']
+✅ 共 11 篇與 鴻海 相關的新聞。
 
 ======================================================================
 
-明天聯電股價走勢：不明確
-原因：聯電股價近期波動大，未來走勢受多種因素影響，包括全球晶圓需求、台積電股價變動等
+🔎 開始分析 聯電 (NEWS_UMC) ...
+[debug] 🔍 正在讀取 Firestore 集合：NEWS_UMC
+[debug] → 文件 20251009_070417 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_7', 'news_8', 'news_3', 'news_6']
+[debug] → 文件 20251010_064110 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_7', 'news_8', 'news_3', 'news_6']
+[debug] → 文件 20251011_063555 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_8', 'news_7', 'news_3', 'news_6']
+[debug] → 文件 20251012_063624 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_8', 'news_7', 'news_3', 'news_6']
+[debug] → 文件 20251013_064414 keys=['news_1', 'news_2', 'news_5', 'news_4', 'news_8', 'news_7', 'news_3', 'news_6']
+[debug] → 文件 20251014_063102 keys=['news_1', 'news_2', 'news_6', 'news_10', 'news_12', 'news_4', 'news_5', 'news_8', 'news_7', 'news_11', 'news_3', 'news_9']
+[debug] → 文件 20251014_064047 keys=['news_1', 'news_2', 'news_6', 'news_12', 'news_10', 'news_4', 'news_5', 'news_8', 'news_7', 'news_11', 'news_3', 'news_9']
+[debug] ✅ 共載入 24 篇新聞
+
+[HIT] 從 EUV 到光罩新技術，看蔡司半導體如何與台灣共創晶片未來 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 創同期次高！聯電9月營收199億元 呈年、月雙增 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT]  (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 傳聯電要求供應商明年降價逾15%  估耗材廠首當其衝 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 麥肯錫報告：中國稀土管制影響德國百萬就業人口 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 喊話共體時艱！ 聯電要求供應商「明年降價15％」 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 1 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 【公告】聯電受邀參與法人說明會相關資訊 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 【公告】聯電代子公司United Semiconductor Japan Co., Ltd. 取得軟體之相關資料 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 荷蘭政府介入安世半導體，憂技術流向中國母企聞泰科技 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 【公告】聯電 2025年9月合併營收199.27億元 年增5.2% (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 傳要求供應商明年降價15% 聯電：不評論價格細節 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 八大公股上週大提款「這檔」AI股破15億元 聯電、鴻海也被倒破萬張 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 台股開盤跌700點算小意思！財經專家揭「撿便宜安全時機」 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 美股崩台股慘！川普再投關稅震撼彈 台股開盤閃崩失守二萬七 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 美挑戰台灣矽盾論 聯電、世界受關注 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 焦點股》聯電：英特爾題材加持 順利填息 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 投信賣飛機！「這2檔」航運股均被倒上千張 聯電、英業達也在出貨榜上 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+[HIT] 開盤／國安基金進場護盤？台股大盤跌800點 台積電跌50元 (4.0) -> ['命中關鍵詞，與 聯電 相關']
+✅ 共 19 篇與 聯電 相關的新聞。
