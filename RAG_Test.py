@@ -1,12 +1,9 @@
 import os
 import re
-import sys
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import List, Dict
-
-import firebase_admin
-from firebase_admin import credentials, firestore
+from google.cloud import firestore
 
 # ---------- 常數 ----------
 TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
@@ -25,23 +22,21 @@ class MatchResult:
     reasons: List[str]
 
 
-# ---------- Firebase 初始化 ----------
+# ---------- Firestore 初始化 ----------
 def get_db():
-    if not firebase_admin._apps:
-        cred = credentials.ApplicationDefault()
-        firebase_admin.initialize_app(cred)
-    return firestore.client()
+    """不使用 firebase_admin，直接用 google-cloud-firestore"""
+    return firestore.Client()
 
 
-# ---------- 輔助函數 ----------
+# ---------- 工具函式 ----------
 def parse_docid_time(docid: str):
     try:
-        parts = docid.split("_")
-        if len(parts) >= 2:
-            return datetime.strptime(parts[-1], "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
+        m = re.search(r"(\d{8})[_-](\d{6})", docid)
+        if not m:
+            return None
+        return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
     except Exception:
-        pass
-    return None
+        return None
 
 
 # ---------- 改良後新聞載入 ----------
@@ -69,7 +64,6 @@ def load_news_items(db, col_name: str, days: int) -> List[Dict]:
                         items.append({"id": f"{d.id}#{k}", "title": title, "content": content, "ts": dt})
                         found = True
 
-        # ✅ 若沒有巢狀格式，直接檢查平面欄位
         if not found and ("title" in data or "content" in data):
             title, content = str(data.get("title") or ""), str(data.get("content") or "")
             uniq = f"{title}|{content}"
@@ -94,9 +88,7 @@ def score_text(text: str, target: str) -> MatchResult:
     alias_pattern = "|".join(map(re.escape, aliases.get(target, [target])))
 
     # 聯電：允許相關詞命中
-    related_umc_keywords = [
-        "晶圓代工", "成熟製程", "8吋", "8 吋", "車用晶片", "驅動ic", "中階製程", "代工廠"
-    ]
+    related_umc_keywords = ["晶圓代工", "成熟製程", "8吋", "8 吋", "車用晶片", "驅動ic", "中階製程", "代工廠"]
 
     if target == "聯電":
         alias_or_related_pattern = alias_pattern + "|" + "|".join(map(re.escape, related_umc_keywords))
@@ -106,14 +98,13 @@ def score_text(text: str, target: str) -> MatchResult:
         if not re.search(alias_pattern, text_norm):
             return MatchResult(0.0, [])
 
-    # 假設 LLM 分析分數邏輯（實際上在別函數呼叫）
-    score = 4.0  # 模擬分數
+    score = 4.0
     reasons = [f"命中關鍵詞，與 {target} 相關"]
     return MatchResult(score, reasons)
 
 
-# ---------- 分析主邏輯 ----------
-def analyze_target(db, collection_name: str, target: str, result_collection: str, force_direction=False):
+# ---------- 主分析 ----------
+def analyze_target(db, collection_name: str, target: str):
     print(f"🔎 開始分析 {target} ({collection_name}) ...")
     items = load_news_items(db, collection_name, LOOKBACK_DAYS)
     if not items:
@@ -138,11 +129,11 @@ def analyze_target(db, collection_name: str, target: str, result_collection: str
 def main():
     db = get_db()
 
-    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
+    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電")
     print("\n" + "=" * 70 + "\n")
-    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
+    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海")
     print("\n" + "=" * 70 + "\n")
-    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")  # ✅ 聯電
+    analyze_target(db, NEWS_COLLECTION_UMC, "聯電")  # ✅ 聯電
 
 
 if __name__ == "__main__":
