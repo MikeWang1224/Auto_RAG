@@ -36,7 +36,7 @@ TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.5"))
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "1.5"))
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "5"))
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
