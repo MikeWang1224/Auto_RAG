@@ -5,7 +5,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '0 9 * * *'  # 每天台灣時間下午5點執行
+    - cron: '30 15 * * *'  # 每天台灣時間晚上11:30執行
   workflow_dispatch:      # 支援手動觸發
 
 permissions:
