@@ -39,7 +39,7 @@ NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.5"))
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))  # ✅ 改為 2 天
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 STOP = False
@@ -246,8 +246,8 @@ def groq_analyze(texts: List[str], target: str, force_direction: bool = False) -
         short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
 
         if force_direction:
-            neg_keywords = ["破局","退出","延宕","裁員","停產","虧損"]
-            pos_keywords = ["合作","接單","成長","擴產","ai","併購"]
+            neg_keywords = ["破局", "退出", "延宕", "裁員", "停產", "虧損"]
+            pos_keywords = ["合作", "接單", "成長", "擴產", "ai", "併購"]
             ltext = combined.lower()
             if any(k in ltext for k in neg_keywords):
                 trend_with_symbol = "偏向下跌 🔽"
@@ -306,8 +306,8 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
             "timestamp": datetime.now(TAIWAN_TZ),
             "result": summary,
         })
-    except Exception as e:
-        log(f"[error] 寫入 Firebase 失敗：{e}")
+    except Exception:
+        pass
 
 # ---------- 主程式 ----------
 def main():
@@ -320,4 +320,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
