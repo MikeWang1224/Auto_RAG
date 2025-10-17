@@ -2,9 +2,10 @@
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
 修正版：
+✅ 改為只抓最近 2 天新聞
+✅ 已全面改用 Groq API（移除舊版 ollama 命名）
 ✅ 聯電抓不到新聞問題修正（放寬 key 條件）
 ✅ parse_docid_time() 加入 .strip()，避免空白導致解析失敗
-✅ LOOKBACK_DAYS 改為 5（可調）
 ✅ SCORE_THRESHOLD 降為 0.5 方便測試
 ✅ 新增過濾關鍵字、乾淨輸出
 ✅ 股價走勢結果自動加符號（上漲🔼、下跌🔽、不明確⚠️）
@@ -37,8 +38,8 @@ TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "1.5"))
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "5"))
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.5"))
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))  # ✅ 改為 2 天
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 STOP = False
@@ -207,7 +208,7 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 def prepare_news_for_llm(news_items: List[str]) -> str:
     return "\n".join(f"新聞 {i}：\n{shorten_text(t)}\n" for i, t in enumerate(news_items, 1))
 
-def ollama_analyze(texts: List[str], target: str, force_direction: bool = False) -> str:
+def groq_analyze(texts: List[str], target: str, force_direction: bool = False) -> str:
     combined = prepare_news_for_llm(texts)
     prompt = f"""你是一位台灣股市研究員。根據以下新聞，判斷「明天{target}股價」最可能走勢。
 請只回覆以下兩行格式（不要多餘文字）：
@@ -232,15 +233,12 @@ def ollama_analyze(texts: List[str], target: str, force_direction: bool = False)
         cleaned = re.sub(r"^```(?:\w+)?|```$", "", raw).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
 
-        # 取得趨勢
         m_trend = re.search(r"(上漲|下跌|不明確)", cleaned)
         trend = m_trend.group(1) if m_trend else "不明確"
 
-        # 加符號
         symbol_map = {"上漲": "🔼", "下跌": "🔽", "不明確": "⚠️"}
         trend_with_symbol = f"{trend} {symbol_map.get(trend, '')}"
 
-        # 原因簡化
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", cleaned)
         reason_text = m_reason.group(1) if m_reason else cleaned
         sentences = re.split(r"[。.!！；;]", reason_text)
@@ -269,7 +267,6 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     items = load_news_items(db, news_col, LOOKBACK_DAYS)
 
-    # 過濾不想要的新聞
     exclude_keywords = ["intel", "輝達", "nvidia", "日月光"]
     items = [
         it for it in items
@@ -294,7 +291,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
     for t in terminal_logs[:MAX_DISPLAY_NEWS]:
         print(t)
 
-    summary = ollama_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target, force_direction)
+    summary = groq_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target, force_direction)
     print(summary)
 
     os.makedirs("result", exist_ok=True)
@@ -315,12 +312,11 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
 # ---------- 主程式 ----------
 def main():
     db = get_db()
-    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")  # 改名
+    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
     print("\n" + "="*70 + "\n")
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
     print("\n" + "="*70 + "\n")
     analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
-
 
 if __name__ == "__main__":
     main()
