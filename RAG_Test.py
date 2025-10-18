@@ -65,7 +65,6 @@ class MatchResult:
     hits: List[Tuple[str, float, str]]
 
 # ---------- 工具 ----------
-# ✅ 改成同時支援 20251018 與 20251018_144133
 DOCID_RE = re.compile(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$")
 
 def normalize(text: str) -> str:
@@ -87,13 +86,12 @@ def first_n_sentences(text: str, n: int = 3) -> str:
     return joined
 
 def parse_docid_time(doc_id: str):
-    """支援日期或日期+時間的 doc_id"""
     doc_id = (doc_id or "").strip()
     m = DOCID_RE.match(doc_id)
     if not m:
         return None
     ymd = m.group("ymd")
-    hms = m.group("hms") or "000000"  # 若無時間則視為 00:00:00
+    hms = m.group("hms") or "000000"
     try:
         return datetime.strptime(ymd + hms, "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
     except:
@@ -121,7 +119,6 @@ def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
     return pos, neg
 
 def load_news_items(db, col_name: str, days: int) -> List[Dict]:
-    """讀取最近 days 天的新聞，支援 doc_id 無時間"""
     items, seen = [], set()
     now = datetime.now(TAIWAN_TZ)
     start = now - timedelta(days=days)
@@ -162,7 +159,6 @@ def compile_tokens(tokens: List[Token]):
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen_keys = 0.0, [], set()
-
     aliases = {
         "台積電": ["台積電", "tsmc", "2330"],
         "鴻海": ["鴻海", "hon hai", "2317", "foxconn", "富士康"],
@@ -171,10 +167,8 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     all_aliases = sum(aliases.values(), []) + ["台積電", "鴻海", "聯電"]
     target_aliases = [target.lower()] + aliases.get(target, [])
     alias_pattern = "|".join(re.escape(a.lower()) for a in target_aliases)
-
     if not re.search(alias_pattern, norm):
         return MatchResult(0.0, [])
-
     sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm)
     for sent in sentences:
         sent = sent.strip()
@@ -322,7 +316,7 @@ def main():
     print("\n" + "="*70 + "\n")
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
     print("\n" + "="*70 + "\n")
-    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
+    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC", force_direction=True)
 
 if __name__ == "__main__":
     main()
