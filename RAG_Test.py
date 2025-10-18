@@ -2,12 +2,13 @@
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
 修正版：
+✅ 支援 Firestore 文件 ID 只有日期（例如 20251018）
 ✅ 改為只抓最近 2 天新聞
-✅ 已全面改用 Groq API（移除舊版 ollama 命名）
+✅ 已全面改用 Groq API
 ✅ 聯電抓不到新聞問題修正（放寬 key 條件）
-✅ parse_docid_time() 加入 .strip()，避免空白導致解析失敗
+✅ parse_docid_time() 可解析無時間尾碼版本
 ✅ SCORE_THRESHOLD 降為 0.5 方便測試
-✅ 新增過濾關鍵字、乾淨輸出
+✅ 過濾無關關鍵字、乾淨輸出
 ✅ 股價走勢結果自動加符號（上漲🔼、下跌🔽、不明確⚠️）
 """
 
@@ -64,7 +65,8 @@ class MatchResult:
     hits: List[Tuple[str, float, str]]
 
 # ---------- 工具 ----------
-DOCID_RE = re.compile(r"^(?P<ymd>\d{8})_(?P<hms>\d{6})$")
+# ✅ 改成同時支援 20251018 與 20251018_144133
+DOCID_RE = re.compile(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$")
 
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
@@ -85,12 +87,15 @@ def first_n_sentences(text: str, n: int = 3) -> str:
     return joined
 
 def parse_docid_time(doc_id: str):
+    """支援日期或日期+時間的 doc_id"""
     doc_id = (doc_id or "").strip()
     m = DOCID_RE.match(doc_id)
     if not m:
         return None
+    ymd = m.group("ymd")
+    hms = m.group("hms") or "000000"  # 若無時間則視為 00:00:00
     try:
-        return datetime.strptime(m.group("ymd")+m.group("hms"), "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
+        return datetime.strptime(ymd + hms, "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
     except:
         return None
 
@@ -116,6 +121,7 @@ def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
     return pos, neg
 
 def load_news_items(db, col_name: str, days: int) -> List[Dict]:
+    """讀取最近 days 天的新聞，支援 doc_id 無時間"""
     items, seen = [], set()
     now = datetime.now(TAIWAN_TZ)
     start = now - timedelta(days=days)
