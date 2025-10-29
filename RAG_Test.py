@@ -2,26 +2,28 @@
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
 更新內容：
-✅ UTF-8 輸出防亂碼
+✅ UTF-8 防亂碼
 ✅ 命中 token 不重複
 ✅ 走勢固定為「偏向上漲 / 偏向下跌 / 持平」
 ✅ 移除最終「結果已儲存」的印出
+✅ Groq 自動分批分析（防止 413）
 """
 
 import os, signal, regex as re, sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 from google.cloud import firestore
 from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 防止亂碼 ----------
-sys.stdout.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding="utf-8")
 
 # ---------- 設定 ----------
 SILENT_MODE = False
 MAX_DISPLAY_NEWS = 5
+BATCH_SIZE = 5  # 🔹 Groq 每批最多分析 5 篇新聞
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 # ---------- 讀 .env ----------
@@ -116,33 +118,48 @@ def score_text(text: str, pos_tokens, neg_tokens) -> MatchResult:
             score += w
     return MatchResult(score, hits)
 
-# ---------- Groq 總結 ----------
+# ---------- Groq 分批分析 ----------
 def groq_analyze(news_list, target):
-    text_block = "\n".join([f"{i+1}. {n}" for i, n in enumerate(news_list)])
-    prompt = f"""你是一位台股分析師。根據以下{target}相關新聞，請判斷明日{target}股價走勢：
+    results = []
+    for i in range(0, len(news_list), BATCH_SIZE):
+        batch = news_list[i:i+BATCH_SIZE]
+        text_block = "\n".join([f"{j+1}. {n}" for j, n in enumerate(batch)])
+        prompt = f"""你是一位台股分析師。根據以下{target}相關新聞，請判斷明日{target}股價走勢：
 請以以下三種其一回答：
 「偏向上漲 🔼」「偏向下跌 🔽」「持平 ⚖️」
 並簡述原因（40字內）。
 
 {text_block}
 """
-    try:
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "你是專業股市分析師，回答簡潔準確。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.0,
-            max_tokens=120,
-        )
-        ans = resp.choices[0].message.content.strip()
-        ans = re.sub(r"\s+", " ", ans)
-        # 若模型仍輸出「不明確」則替換為「持平 ⚖️」
-        ans = re.sub(r"不明確.*", "持平 ⚖️", ans)
-        return ans
-    except Exception as e:
-        return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})"
+        try:
+            resp = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": "你是專業股市分析師，回答簡潔準確。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=120,
+            )
+            ans = resp.choices[0].message.content.strip()
+            ans = re.sub(r"\s+", " ", ans)
+            ans = re.sub(r"不明確.*", "持平 ⚖️", ans)
+            results.append(ans)
+        except Exception as e:
+            results.append(f"持平 ⚖️（Groq分析失敗：{e}）")
+
+    # 將所有批次的判斷整合為最終結果（以多數決）
+    up = sum("上漲" in r for r in results)
+    down = sum("下跌" in r for r in results)
+    flat = sum("持平" in r for r in results)
+    if up > down and up > flat:
+        final = "偏向上漲 🔼"
+    elif down > up and down > flat:
+        final = "偏向下跌 🔽"
+    else:
+        final = "持平 ⚖️"
+    reason = results[-1] if results else "無分析結果"
+    return f"明天{target}股價走勢：{final}\n原因：{reason}"
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
