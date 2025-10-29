@@ -1,29 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-格式完全比照範例輸出：
-- 每則新聞有命中列表與趨勢符號
-- 最後用 Groq 總結明日走勢與原因
-- Firestore 寫回結果
+股票新聞分析工具（多公司 RAG 版）
+修正版：
+1. 命中 token 去重（相同 pattern+note 只顯示一次）
+2. Groq 分析錯誤容錯更強
 """
 
-import os, signal, regex as re, sys, io
+import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 from google.cloud import firestore
 from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 設定 ----------
-SILENT_MODE = False
-MAX_DISPLAY_NEWS = 5
 TAIWAN_TZ = timezone(timedelta(hours=8))
-
-# ---------- 讀 .env ----------
-if os.path.exists(".env"):
-    load_dotenv(".env", override=True)
-
 TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
@@ -31,14 +23,17 @@ NEWS_COLLECTION_UMC = "NEWS_UMC"
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.2"))
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))
 
+# ---------- 初始化 ----------
+if os.path.exists(".env"):
+    load_dotenv(".env", override=True)
+
 STOP = False
 def _sigint_handler(signum, frame):
     global STOP
     STOP = True
-    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
+    print("\n[info] 偵測到 Ctrl+C，安全停止…")
 signal.signal(signal.SIGINT, _sigint_handler)
 
-# ---------- 資料結構 ----------
 @dataclass
 class Token:
     polarity: str
@@ -52,7 +47,6 @@ class MatchResult:
     score: float
     hits: List[Tuple[str, float, str]]
 
-# ---------- 工具 ----------
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
@@ -72,11 +66,12 @@ def parse_docid_time(doc_id: str):
     except:
         return None
 
-# ---------- 初始化 ----------
-def get_db(): return firestore.Client()
+def get_db(): 
+    return firestore.Client()
+
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# ---------- Token 處理 ----------
+# ---------- Token ----------
 def load_tokens(db):
     pos, neg = [], []
     for d in db.collection(TOKENS_COLLECTION).stream():
@@ -94,21 +89,27 @@ def load_tokens(db):
             neg.append(t)
     return pos, neg
 
-# ---------- 打分 ----------
+# ---------- 打分 + 去重 ----------
 def score_text(text: str, pos_tokens, neg_tokens) -> MatchResult:
     text_norm = normalize(text)
     score, hits = 0.0, []
+    seen = set()
     for t in pos_tokens + neg_tokens:
         w = t.weight if t.polarity == "positive" else -abs(t.weight)
         matched = re.search(t.pattern, text_norm, re.I) if t.ttype == "regex" else t.pattern.lower() in text_norm
-        if matched:
+        key = (t.pattern.lower(), t.note)
+        if matched and key not in seen:
             hits.append((t.pattern, w, t.note))
+            seen.add(key)
             score += w
     return MatchResult(score, hits)
 
-# ---------- Groq 總結 ----------
+# ---------- Groq 分析 ----------
 def groq_analyze(news_list, target):
-    text_block = "\n".join([f"{i+1}. {n}" for i,n in enumerate(news_list)])
+    if not news_list:
+        return f"明天{target}股價走勢：不明確 ⚠️\n原因：無相關新聞"
+
+    text_block = "\n".join([f"{i+1}. {first_n_sentences(n)}" for i, n in enumerate(news_list)])
     prompt = f"""你是一位台股分析師。根據以下{target}相關新聞，請判斷明日{target}股價走勢：
 回覆格式：
 明天{target}股價走勢：<上漲/下跌/不明確> 🔼🔽⚠️
@@ -129,9 +130,9 @@ def groq_analyze(news_list, target):
         ans = resp.choices[0].message.content.strip()
         return re.sub(r"\s+"," ",ans)
     except Exception as e:
-        return f"明天{target}股價走勢：不明確 ⚠️\n原因：Groq分析失敗({e})"
+        return f"明天{target}股價走勢：不明確 ⚠️\n原因：Groq分析失敗({type(e).__name__})"
 
-# ---------- 主分析 ----------
+# ---------- 單公司分析 ----------
 def analyze_target(db, collection, target, result_field):
     pos, neg = load_tokens(db)
     items = db.collection(collection).stream()
@@ -142,7 +143,8 @@ def analyze_target(db, collection, target, result_field):
 
     for d in items:
         t = parse_docid_time(d.id)
-        if not t or t < start: continue
+        if not t or t < start:
+            continue
         data = d.to_dict() or {}
         for k,v in data.items():
             if not isinstance(v,dict): continue
@@ -151,10 +153,11 @@ def analyze_target(db, collection, target, result_field):
             res = score_text(full, pos, neg)
             if abs(res.score) < SCORE_THRESHOLD or not res.hits:
                 continue
+
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
             hit_lines = [f"  {'+' if w>0 else '-'} {p}（{n}）" for p,w,n in res.hits]
             part = f"[{d.id}#{k}]\n標題：{first_n_sentences(title)}\n{trend}\n命中：\n" + "\n".join(hit_lines)
-            output_lines.append(part+"\n")
+            output_lines.append(part)
             groq_inputs.append(full)
             filtered.append((d.id, k, res))
 
@@ -162,9 +165,8 @@ def analyze_target(db, collection, target, result_field):
         return f"{target}：無明顯變化\n"
 
     groq_result = groq_analyze(groq_inputs, target)
-    output = "\n".join(output_lines) + "\n" + groq_result + "\n"
+    output = "\n".join(output_lines) + "\n\n" + groq_result + "\n"
 
-    # 寫回 Firestore
     for doc_id, key, res in filtered:
         try:
             db.collection(collection).document(doc_id).set({
@@ -180,6 +182,7 @@ def analyze_target(db, collection, target, result_field):
             }, merge=True)
         except Exception as e:
             print(f"[warning] Firestore 寫回失敗 {doc_id}#{key}: {e}")
+
     return output
 
 # ---------- 主程式 ----------
@@ -198,14 +201,14 @@ def main():
     ]):
         print(f"📈 分析：{target}")
         res = analyze_target(db, col, target, field)
-        results.append(f"{res.strip()}\n")
+        print(res.strip())
         if i < 2:
             print("="*70)
+        results.append(f"📈 分析：{target}\n{res.strip()}")
 
-    final_output = "\n" + ("="*70 + "\n").join(results)
+    final_output = "\n" + ("\n" + "="*70 + "\n").join(results)
     with open(result_file, "w", encoding="utf-8") as f:
         f.write(final_output)
-
     print(f"\n✅ 結果已儲存至：{result_file}")
 
 if __name__ == "__main__":
