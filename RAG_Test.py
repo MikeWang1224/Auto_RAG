@@ -12,6 +12,7 @@
 ✅ 股價走勢結果自動加符號（上漲🔼、下跌🔽、不明確⚠️）
 """
 
+
 import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
