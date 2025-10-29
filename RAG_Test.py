@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-最終版：
-✅ Firestore 文件 ID 只有日期（例如 20251018）
-✅ 只抓最近 2 天新聞
-✅ 已全面改用 Groq API
-✅ 聯電抓不到新聞問題修正
-✅ 結果輸出統一在 results/result_YYYYMMDD.txt
-✅ 結合三家公司分析結果
+最終版（含寫回 Firestore）：
+- Firestore 文件 ID 只有日期（例如 20251018）
+- 只抓最近 LOOKBACK_DAYS 天新聞
+- 已全面改用 Groq API
+- 結合三家公司分析結果並統一輸出格式
+- 公司間只用一條分隔線
+- 不會在終端顯示額外的 [info] 已輸出... 行
+- 會把 Groq 的分析結果寫回到原新聞文件（欄位名稱由呼叫端指定）
 """
 
-import os, signal, regex as re, sys, io
+import os
+import signal
+import regex as re
+import sys
+import io
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple, Dict
@@ -19,7 +24,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 設定 ----------
-SILENT_MODE = False        # ✅ 設為 False 才會印出內容
+SILENT_MODE = False        # 設為 False 才會印出內容到 results 檔
 MAX_DISPLAY_NEWS = 5
 
 def log(msg: str):
@@ -259,7 +264,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
     ]
 
     if not items:
-        print(f"[{target}] 找不到符合新聞")
+        # 不印任何東西（保持輸出乾淨）
         return ""
 
     filtered, terminal_logs = [], []
@@ -272,12 +277,44 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
             hits_text_lines = [f"  {'+' if w>0 else '-'} {patt}（{note}）" for patt, w, note in res.hits]
             truncated_title = first_n_sentences(it.get("title",""), 3)
-            terminal_logs.append(f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n")
+            terminal_logs.append(f"[{it['id']}]
+標題：{truncated_title}
+{trend}
+命中：\n" + "\n".join(hits_text_lines) + "\n")
 
-    summary = groq_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target, force_direction)
+    # 用 Groq 對篩選後的新聞集合做總結
+    summary_text = groq_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target, force_direction)
 
-    output = "\n".join(terminal_logs[:MAX_DISPLAY_NEWS]) + "\n" + "="*60 + "\n" + summary + "\n"
-    print(output)
+    # 解析 Groq 回傳的趨勢與原因（若可能）
+    m_trend = re.search(r"明天.*股價走勢：\s*(上漲|下跌|不明確)", summary_text)
+    m_reason = re.search(r"原因：\s*(.+)", summary_text)
+    parsed_trend = m_trend.group(1) if m_trend else "不明確"
+    parsed_reason = m_reason.group(1).strip() if m_reason else summary_text
+
+    # 最終輸出（terminal logs + 分隔 + summary）
+    output = "\n".join(terminal_logs[:MAX_DISPLAY_NEWS]) + "\n" + "="*70 + "\n" + summary_text + "\n"
+
+    # 同時寫回 Firestore：將分析結果寫回到對應的 parent doc（用 set merge 以避免覆寫）
+    # 結構： { result_col: { <news_key>: {"summary": ..., "trend": ..., "reason": ..., "updated_at": ... } } }
+    now_iso = datetime.now(TAIWAN_TZ).isoformat()
+    for (it, res) in filtered:
+        parent, key = it['id'].split('#', 1)
+        payload = {
+            "summary": summary_text,
+            "trend": parsed_trend,
+            "reason": parsed_reason,
+            "score": res.score,
+            "hits": [{"pattern": h[0], "weight": h[1], "note": h[2]} for h in res.hits],
+            "updated_at": now_iso,
+        }
+        try:
+            # 使用 set merge=True 保留原文件其他欄位
+            db.collection(news_col).document(parent).set({result_col: {key: payload}}, merge=True)
+        except Exception:
+            # 若寫回失敗，不中斷主流程，只記錄到 stdout（或在需要時記日誌）
+            log(f"[warning] 無法寫回 Firestore: {news_col}/{parent} - {key}")
+
+    # 將整理過的輸出回傳（方便寫入 results 檔）
     return output
 
 # ---------- 主程式 ----------
@@ -291,23 +328,25 @@ def main():
     buf = io.StringIO()
     sys.stdout = buf
 
-    print("=== 股票新聞分析工具整合輸出 ===\n")
-
+    # 不要多餘標題或 info 行，直接把各公司內容連續輸出
     all_results = []
-    for target, col, result_col, force_dir in [
+    for i, (target, col, result_col, force_dir) in enumerate([
         ("台積電", NEWS_COLLECTION_TSMC, "Groq_result", False),
         ("鴻海", NEWS_COLLECTION_FOX, "Groq_result_Foxxcon", True),
         ("聯電", NEWS_COLLECTION_UMC, "Groq_result_UMC", True),
-    ]:
-        print(f"\n===== {target} =====")
+    ]):
         all_results.append(analyze_target(db, col, target, result_col, force_dir))
-        print("\n" + "="*70 + "\n")
+        # 公司間只用一條分隔線
+        if i < 2:
+            print("=" * 70)
 
     sys.stdout = sys.__stdout__
+
+    # 將結果寫入檔案（原本的行為）
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(buf.getvalue())
 
-    print(f"[info] 已輸出完整結果：{output_path}")
+    # 不輸出額外的 [info] 行，保持輸出整潔
 
 if __name__ == "__main__":
     main()
