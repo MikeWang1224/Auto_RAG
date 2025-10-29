@@ -3,13 +3,14 @@
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
 修正版：
 ✅ 支援 Firestore 文件 ID 只有日期（例如 20251018）
-✅ 改為只抓最近 2 天新聞
+✅ 只抓最近 2 天新聞
 ✅ 已全面改用 Groq API
 ✅ 聯電抓不到新聞問題修正（放寬 key 條件）
 ✅ parse_docid_time() 可解析無時間尾碼版本
 ✅ SCORE_THRESHOLD 降為 0.5 方便測試
 ✅ 過濾無關關鍵字、乾淨輸出
 ✅ 股價走勢結果自動加符號（上漲🔼、下跌🔽、不明確⚠️）
+✅ 只用 Firestore bull_tokens 判斷，不使用程式內建 token
 """
 
 import os, signal, regex as re
@@ -35,9 +36,9 @@ else:
     load_dotenv(".env", override=True)
 
 # ---------- 常數 ----------
-TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
-NEWS_COLLECTION_TSMC = "NEWS"
-NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
+TOKENS_COLLECTION = "bull_tokens"
+NEWS_COLLECTION_TSMC = "NEWS_TSMC"
+NEWS_COLLECTION_FOX = "NEWS_FOXCONN"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.5"))
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))
@@ -101,12 +102,12 @@ def parse_docid_time(doc_id: str):
 def get_db():
     return firestore.Client()
 
-def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
+def load_tokens(db) -> Tuple[List[Token], List[Token]]:
     pos, neg = [], []
-    for d in db.collection(col).stream():
+    for d in db.collection(TOKENS_COLLECTION).stream():
         data = d.to_dict() or {}
-        pol = (data.get("polarity") or "").lower()
-        ttype = (data.get("type") or "substr").lower()
+        pol = (data.get("type") or "").lower()
+        ttype = (data.get("method") or "substr").lower()
         patt = str(data.get("pattern") or "")
         note = str(data.get("note") or "")
         try:
@@ -208,13 +209,16 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 def prepare_news_for_llm(news_items: List[str]) -> str:
     return "\n".join(f"新聞 {i}：\n{shorten_text(t)}\n" for i, t in enumerate(news_items, 1))
 
-def groq_analyze(texts: List[str], target: str, force_direction: bool = False) -> str:
+def groq_analyze(texts: List[str], target: str, token_summary: str = "") -> str:
     combined = prepare_news_for_llm(texts)
-    prompt = f"""你是一位台灣股市研究員。根據以下新聞，判斷「明天{target}股價」最可能走勢。
+    prompt = f"""你是一位台灣股市研究員。根據以下新聞與打分摘要，判斷「明天{target}股價」最可能走勢。
 請只回覆以下兩行格式（不要多餘文字）：
 
 明天{target}股價走勢：<上漲 / 下跌 / 不明確>
 原因：<40字以內，一句話簡潔說明主要理由>
+
+打分摘要（來自 Firestore bull_tokens）：
+{token_summary}
 
 新聞摘要：
 {combined}
@@ -245,25 +249,14 @@ def groq_analyze(texts: List[str], target: str, force_direction: bool = False) -
         short_reason = "，".join(sentences[:2]).strip()
         short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
 
-        if force_direction:
-            neg_keywords = ["破局", "退出", "延宕", "裁員", "停產", "虧損"]
-            pos_keywords = ["合作", "接單", "成長", "擴產", "ai", "併購"]
-            ltext = combined.lower()
-            if any(k in ltext for k in neg_keywords):
-                trend_with_symbol = "偏向下跌 🔽"
-            elif any(k in ltext for k in pos_keywords):
-                trend_with_symbol = "偏向上漲 🔼"
-            else:
-                trend_with_symbol = "偏向下跌 🔽"
-
         return f"明天{target}股價走勢：{trend_with_symbol}\n原因：{short_reason}"
 
     except Exception as e:
         return f"[error] Groq 呼叫失敗：{e}"
 
 # ---------- 分析 ----------
-def analyze_target(db, news_col: str, target: str, result_col: str, force_direction=False):
-    pos, neg = load_tokens(db, TOKENS_COLLECTION)
+def analyze_target(db, news_col: str, target: str, result_col: str):
+    pos, neg = load_tokens(db)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     items = load_news_items(db, news_col, LOOKBACK_DAYS)
 
@@ -291,7 +284,12 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
     for t in terminal_logs[:MAX_DISPLAY_NEWS]:
         print(t)
 
-    summary = groq_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target, force_direction)
+    token_summary = "\n".join([
+        f"新聞：{first_n_sentences(x[0].get('title',''),1)} 分數：{x[1].score:+.2f} 命中：{', '.join([n for _,_,n in x[1].hits])}"
+        for x in filtered
+    ])
+
+    summary = groq_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target, token_summary)
     print(summary)
 
     os.makedirs("result", exist_ok=True)
@@ -314,9 +312,9 @@ def main():
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
     print("\n" + "="*70 + "\n")
-    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
+    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
     print("\n" + "="*70 + "\n")
-    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC", force_direction=True)
+    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
 
 if __name__ == "__main__":
     main()
