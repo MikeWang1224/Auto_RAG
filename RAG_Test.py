@@ -277,7 +277,7 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
             hits_text_lines = [f"  {'+' if w>0 else '-'} {patt}（{note}）" for patt, w, note in res.hits]
             truncated_title = first_n_sentences(it.get("title",""), 3)
-            terminal_logs.append(f"[{it['id']}]
+            terminal_logs.append(f"""[{it['id']}]
 標題：{truncated_title}
 {trend}
 命中：\n" + "\n".join(hits_text_lines) + "\n")
