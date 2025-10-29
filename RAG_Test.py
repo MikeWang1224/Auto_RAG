@@ -1,57 +1,48 @@
 # -*- coding: utf-8 -*-
 """
-股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-最終版（含寫回 Firestore）：
-- Firestore 文件 ID 只有日期（例如 20251018）
-- 只抓最近 LOOKBACK_DAYS 天新聞
-- 已全面改用 Groq API
-- 結合三家公司分析結果並統一輸出格式
-- 公司間只用一條分隔線
-- 不會在終端顯示額外的 [info] 已輸出... 行
-- 會把 Groq 的分析結果寫回到原新聞文件（欄位名稱由呼叫端指定）
+股票新聞分析（多公司版）
+✅ 輸出顯示在終端
+✅ 同步寫回 Firebase
+✅ 自動儲存結果於 results/ 下
 """
 
 import os
 import signal
 import regex as re
-import sys
-import io
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Dict
 from google.cloud import firestore
 from dotenv import load_dotenv
 from groq import Groq
 
-# ---------- 設定 ----------
-SILENT_MODE = False        # 設為 False 才會印出內容到 results 檔
+# ---------- 全域設定 ----------
+SILENT_MODE = False
 MAX_DISPLAY_NEWS = 5
+TAIWAN_TZ = timezone(timedelta(hours=8))
+STOP = False
 
-def log(msg: str):
-    if not SILENT_MODE:
-        print(msg)
-
-# ---------- 讀 .env ----------
+# ---------- 讀取環境變數 ----------
 if os.path.exists(".env"):
     load_dotenv(".env", override=True)
 
-# ---------- 常數 ----------
-TOKENS_COLLECTION = os.getenv("FIREBASE_TOKENS_COLLECTION", "bull_tokens")
+PROJECT_ID = os.getenv("FIREBASE_PROJECT")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+TOKENS_COLLECTION = "bull_tokens"
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.5"))
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))
-TAIWAN_TZ = timezone(timedelta(hours=8))
+SCORE_THRESHOLD = 0.5
+LOOKBACK_DAYS = 2
 
-STOP = False
+# ---------- Ctrl+C 安全停止 ----------
 def _sigint_handler(signum, frame):
     global STOP
     STOP = True
-    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
+    print("\n⚠️ 偵測到 Ctrl+C，停止中…")
 signal.signal(signal.SIGINT, _sigint_handler)
 
-# ---------- 結構 ----------
+# ---------- 資料結構 ----------
 @dataclass
 class Token:
     polarity: str
@@ -63,221 +54,89 @@ class Token:
 @dataclass
 class MatchResult:
     score: float
-    hits: List[Tuple[str, float, str]]
+    hits: list[tuple[str, float, str]]
 
 # ---------- 工具 ----------
-DOCID_RE = re.compile(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$")
-
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
-
-def shorten_text(t: str, n=200):
-    return t[:n] + "…" if len(t) > n else t
 
 def first_n_sentences(text: str, n: int = 3) -> str:
     if not text:
         return ""
     parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
     parts = [p for p in parts if p.strip()]
-    if not parts:
-        return text.strip()
     joined = "".join(parts[:n])
-    if not re.search(r'[。\.！!\?？；;]\s*$', joined):
-        joined += "..."
+    if not re.search(r'[。\.！!\?？；;]$', joined):
+        joined += "。"
     return joined
 
-def parse_docid_time(doc_id: str):
-    doc_id = (doc_id or "").strip()
-    m = DOCID_RE.match(doc_id)
-    if not m:
-        return None
-    ymd = m.group("ymd")
-    hms = m.group("hms") or "000000"
-    try:
-        return datetime.strptime(ymd + hms, "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
-    except:
-        return None
+# ---------- 初始化 ----------
+def init_firestore():
+    return firestore.Client(project=PROJECT_ID)
 
-# ---------- Firestore ----------
-def get_db():
-    return firestore.Client()
+def init_groq():
+    return Groq(api_key=GROQ_API_KEY)
 
-def load_tokens(db, col) -> Tuple[List[Token], List[Token]]:
-    pos, neg = [], []
-    for d in db.collection(col).stream():
-        data = d.to_dict() or {}
-        pol = (data.get("polarity") or "").lower()
-        ttype = (data.get("type") or "substr").lower()
-        patt = str(data.get("pattern") or "")
-        note = str(data.get("note") or "")
-        try:
-            w = float(data.get("weight", 1.0))
-        except:
-            w = 1.0
-        if not patt or pol not in ("positive", "negative"):
-            continue
-        (pos if pol == "positive" else neg).append(Token(pol, ttype, patt, w, note))
-    return pos, neg
+# ---------- 載入 Token ----------
+def load_tokens(db, collection: str):
+    tokens = []
+    for d in db.collection(collection).stream():
+        t = d.to_dict()
+        tokens.append(Token(
+            polarity=t.get("polarity", ""),
+            ttype=t.get("type", ""),
+            pattern=t.get("pattern", ""),
+            weight=float(t.get("weight", 1.0)),
+            note=t.get("note", "")
+        ))
+    return tokens
 
-def load_news_items(db, col_name: str, days: int) -> List[Dict]:
-    items, seen = [], set()
+# ---------- 評分 ----------
+def score_text(text: str, pos_tokens, neg_tokens, target: str):
+    text_norm = normalize(text)
+    total = 0.0
+    hits = []
+    for tok in pos_tokens + neg_tokens:
+        found = False
+        if tok.ttype == "substr" and tok.pattern in text_norm:
+            found = True
+        elif tok.ttype == "regex" and re.search(tok.pattern, text_norm):
+            found = True
+        if found:
+            w = tok.weight if tok.polarity == "positive" else -tok.weight
+            total += w
+            hits.append((tok.pattern, w, tok.note))
+    return MatchResult(score=total, hits=hits)
+
+# ---------- Firestore 寫入 ----------
+def write_result(db, collection, doc_id, data):
+    ref = db.collection(collection).document(doc_id)
+    ref.set(data, merge=True)
+
+# ---------- 主分析函數 ----------
+def analyze_target(db, news_collection, target_name, result_collection, force_dir=False):
+    pos_tokens = load_tokens(db, TOKENS_COLLECTION)
+    neg_tokens = [t for t in pos_tokens if t.polarity == "negative"]
+    pos_tokens = [t for t in pos_tokens if t.polarity == "positive"]
+
     now = datetime.now(TAIWAN_TZ)
-    start = now - timedelta(days=days)
-    for d in db.collection(col_name).stream():
-        dt = parse_docid_time(d.id)
-        if dt and dt < start:
-            continue
-        data = d.to_dict() or {}
-        for k, v in data.items():
-            if not isinstance(v, dict):
-                continue
-            title, content = str(v.get("title") or ""), str(v.get("content") or "")
-            if not title and not content:
-                continue
-            uniq = f"{title}|{content}"
-            if uniq in seen:
-                continue
-            seen.add(uniq)
-            items.append({"id": f"{d.id}#{k}", "title": title, "content": content, "ts": dt})
-    items.sort(key=lambda x: x["ts"] or datetime.min.replace(tzinfo=TAIWAN_TZ), reverse=True)
-    return items
+    since = now - timedelta(days=LOOKBACK_DAYS)
+    news_docs = list(db.collection(news_collection).stream())
 
-# ---------- Token 打分 ----------
-def compile_tokens(tokens: List[Token]):
-    out = []
-    for t in tokens:
-        w = t.weight if t.polarity == "positive" else -abs(t.weight)
-        if t.ttype == "regex":
-            try:
-                cre = re.compile(t.pattern, flags=re.IGNORECASE)
-                out.append(("regex", cre, w, t.note, t.pattern))
-            except:
-                continue
-        else:
-            out.append(("substr", None, w, t.note, t.pattern.lower()))
-    return out
-
-def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
-    norm = normalize(text)
-    score, hits, seen_keys = 0.0, [], set()
-    aliases = {
-        "台積電": ["台積電", "tsmc", "2330"],
-        "鴻海": ["鴻海", "hon hai", "2317", "foxconn", "富士康"],
-        "聯電": ["聯電", "umc", "2303"],
-    }
-    all_aliases = sum(aliases.values(), []) + ["台積電", "鴻海", "聯電"]
-    target_aliases = [target.lower()] + aliases.get(target, [])
-    alias_pattern = "|".join(re.escape(a.lower()) for a in target_aliases)
-    if not re.search(alias_pattern, norm):
-        return MatchResult(0.0, [])
-    sentences = re.split(r'(?<=[。\.！!\?？；;])\s*', norm)
-    for sent in sentences:
-        sent = sent.strip()
-        if not sent:
-            continue
-        company_spans = []
-        for comp in all_aliases:
-            for m in re.finditer(re.escape(comp.lower()), sent):
-                company_spans.append((m.start(), comp.lower()))
-        company_spans.sort()
-        if not company_spans:
-            continue
-        if len(company_spans) == 1 and re.search(alias_pattern, sent):
-            segments = [sent]
-        else:
-            segments = []
-            for i, (pos, name) in enumerate(company_spans):
-                next_pos = company_spans[i + 1][0] if i + 1 < len(company_spans) else len(sent)
-                segment = sent[pos:next_pos]
-                if re.search(alias_pattern, segment):
-                    segments.append(segment)
-        for segment in segments:
-            for ttype, cre, w, note, patt in pos_c + neg_c:
-                key = (patt, note)
-                if key in seen_keys:
-                    continue
-                matched = cre.search(segment) if ttype == "regex" else patt in segment
-                if matched:
-                    score += w
-                    hits.append((patt, w, note))
-                    seen_keys.add(key)
-    return MatchResult(score, hits)
-
-# ---------- Groq ----------
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-def prepare_news_for_llm(news_items: List[str]) -> str:
-    return "\n".join(f"新聞 {i}：\n{shorten_text(t)}\n" for i, t in enumerate(news_items, 1))
-
-def groq_analyze(texts: List[str], target: str, force_direction: bool = False) -> str:
-    combined = prepare_news_for_llm(texts)
-    prompt = f"""你是一位台灣股市研究員。根據以下新聞，判斷「明天{target}股價」最可能走勢。
-請只回覆以下兩行格式（不要多餘文字）：
-
-明天{target}股價走勢：<上漲 / 下跌 / 不明確>
-原因：<40字以內，一句話簡潔說明主要理由>
-
-新聞摘要：
-{combined}
-"""
-    try:
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "你是專業股市新聞分析員，回答簡潔準確。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
-            max_tokens=150,
-        )
-        raw = resp.choices[0].message.content.strip()
-        cleaned = re.sub(r"^```(?:\w+)?|```$", "", raw).strip()
-        cleaned = re.sub(r"\s+", " ", cleaned)
-
-        m_trend = re.search(r"(上漲|下跌|不明確)", cleaned)
-        trend = m_trend.group(1) if m_trend else "不明確"
-
-        symbol_map = {"上漲": "🔼", "下跌": "🔽", "不明確": "⚠️"}
-        trend_with_symbol = f"{trend} {symbol_map.get(trend, '')}"
-
-        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", cleaned)
-        reason_text = m_reason.group(1) if m_reason else cleaned
-        sentences = re.split(r"[。.!！；;]", reason_text)
-        short_reason = "，".join(sentences[:2]).strip()
-        short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
-
-        return f"明天{target}股價走勢：{trend_with_symbol}\n原因：{short_reason}"
-
-    except Exception as e:
-        return f"[error] Groq 呼叫失敗：{e}"
-
-# ---------- 分析 ----------
-def analyze_target(db, news_col: str, target: str, result_col: str, force_direction=False):
-    pos, neg = load_tokens(db, TOKENS_COLLECTION)
-    pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
-    items = load_news_items(db, news_col, LOOKBACK_DAYS)
-
-    exclude_keywords = ["intel", "輝達", "nvidia", "日月光"]
-    items = [
-        it for it in items
-        if not any(k.lower() in ((it.get("title") or "") + " " + (it.get("content") or "")).lower() for k in exclude_keywords)
-    ]
-
-    if not items:
-        return ""
-
-    filtered, terminal_logs = [], []
-    for it in items:
+    terminal_logs = []
+    for doc in news_docs:
         if STOP:
             break
-        res = score_text(it.get("content") or it.get("title") or "", pos_c, neg_c, target)
+        it = doc.to_dict()
+        it["id"] = doc.id
+        text = it.get("content") or it.get("title") or ""
+        res = score_text(text, pos_tokens, neg_tokens, target_name)
         if abs(res.score) >= SCORE_THRESHOLD and res.hits:
-            filtered.append((it, res))
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
-            hits_text_lines = [f"  {'+' if w>0 else '-'} {patt}（{note}）" for patt, w, note in res.hits]
-            truncated_title = first_n_sentences(it.get("title",""), 3)
-
-            # ✅ 修正後多行字串（不會出現 SyntaxError）
+            hits_text_lines = [
+                f"  {'+' if w>0 else '-'} {patt}（{note}）" for patt, w, note in res.hits
+            ]
+            truncated_title = first_n_sentences(it.get("title", ""), 3)
             terminal_logs.append(
                 f"""[{it['id']}]
 標題：{truncated_title}
@@ -286,58 +145,49 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
 """ + "\n".join(hits_text_lines) + "\n"
             )
 
-    summary_text = groq_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target, force_direction)
+    # 輸出結果文字
+    if not terminal_logs:
+        result_text = f"{target_name}：無明顯變化"
+    else:
+        result_text = "\n".join(terminal_logs)
+    print(result_text)
 
-    m_trend = re.search(r"明天.*股價走勢：\s*(上漲|下跌|不明確)", summary_text)
-    m_reason = re.search(r"原因：\s*(.+)", summary_text)
-    parsed_trend = m_trend.group(1) if m_trend else "不明確"
-    parsed_reason = m_reason.group(1).strip() if m_reason else summary_text
+    # 寫回 Firestore
+    write_result(db, result_collection, now.strftime("%Y%m%d"), {
+        "summary": result_text,
+        "updated": now.isoformat(),
+    })
 
-    output = "\n".join(terminal_logs[:MAX_DISPLAY_NEWS]) + "\n" + "="*70 + "\n" + summary_text + "\n"
-
-    now_iso = datetime.now(TAIWAN_TZ).isoformat()
-    for (it, res) in filtered:
-        parent, key = it['id'].split('#', 1)
-        payload = {
-            "summary": summary_text,
-            "trend": parsed_trend,
-            "reason": parsed_reason,
-            "score": res.score,
-            "hits": [{"pattern": h[0], "weight": h[1], "note": h[2]} for h in res.hits],
-            "updated_at": now_iso,
-        }
-        try:
-            db.collection(news_col).document(parent).set({result_col: {key: payload}}, merge=True)
-        except Exception:
-            log(f"[warning] 無法寫回 Firestore: {news_col}/{parent} - {key}")
-
-    return output
+    return result_text
 
 # ---------- 主程式 ----------
 def main():
-    db = get_db()
-
     os.makedirs("results", exist_ok=True)
-    today = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
-    output_path = f"results/result_{today}.txt"
+    db = init_firestore()
+    now = datetime.now(TAIWAN_TZ)
 
-    buf = io.StringIO()
-    sys.stdout = buf
+    print("🚀 開始分析台股焦點股...\n")
 
     all_results = []
-    for i, (target, col, result_col, force_dir) in enumerate([
+    targets = [
         ("台積電", NEWS_COLLECTION_TSMC, "Groq_result", False),
         ("鴻海", NEWS_COLLECTION_FOX, "Groq_result_Foxxcon", True),
         ("聯電", NEWS_COLLECTION_UMC, "Groq_result_UMC", True),
-    ]):
-        all_results.append(analyze_target(db, col, target, result_col, force_dir))
-        if i < 2:
+    ]
+
+    for i, (target, col, result_col, force_dir) in enumerate(targets):
+        print(f"📈 分析：{target}")
+        result_text = analyze_target(db, col, target, result_col, force_dir)
+        all_results.append(result_text)
+        if i < len(targets) - 1:
             print("=" * 70)
 
-    sys.stdout = sys.__stdout__
+    # 儲存文字檔
+    file_path = f"results/result_{now.strftime('%Y%m%d')}.txt"
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(all_results))
+    print(f"\n✅ 結果已儲存至：{file_path}")
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(buf.getvalue())
-
+# ---------- 執行 ----------
 if __name__ == "__main__":
     main()
