@@ -8,21 +8,21 @@
 ✅ Firestore 寫回結果
 ✅ Groq 失敗自動持平
 ✅ 執行速度最佳化
+✅ 股票間輸出用 ======= 分隔
 """
 
 import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 from google.cloud import firestore
 from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 設定 ----------
-SILENT_MODE = True  # ✅ 設為 True 時不顯示 🚀 開始分析... 的提示
+SILENT_MODE = True  # True = 不顯示 🚀 開始分析訊息
 SCORE_THRESHOLD = 1.5
 TAIWAN_TZ = timezone(timedelta(hours=8))
-MAX_DISPLAY_NEWS = 5
 
 TOKENS_COLLECTION = "bull_tokens"
 NEWS_COLLECTION_TSMC = "NEWS"
@@ -172,7 +172,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
 
     today_str = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
-    items, filtered = [], []
+    filtered = []
 
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
@@ -214,12 +214,11 @@ def main():
         print("🚀 開始分析台股焦點股（僅今日新聞，分數 > 1.5）...\n")
 
     db = get_db()
+
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
-    if not SILENT_MODE:
-        print("="*70)
+    print("=" * 70)  # ✅ 股票間分隔線
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
-    if not SILENT_MODE:
-        print("="*70)
+    print("=" * 70)
     analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
 
 if __name__ == "__main__":
