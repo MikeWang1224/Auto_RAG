@@ -1,19 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-修正版：
-✅ 支援 Firestore 文件 ID 只有日期（例如 20251018）
-✅ 改為只抓最近 2 天新聞
+最終版：
+✅ Firestore 文件 ID 只有日期（例如 20251018）
+✅ 只抓最近 2 天新聞
 ✅ 已全面改用 Groq API
-✅ 聯電抓不到新聞問題修正（放寬 key 條件）
-✅ parse_docid_time() 可解析無時間尾碼版本
-✅ SCORE_THRESHOLD 降為 0.5 方便測試
-✅ 過濾無關關鍵字、乾淨輸出
-✅ 股價走勢結果自動加符號（上漲🔼、下跌🔽、不明確⚠️）
+✅ 聯電抓不到新聞問題修正
+✅ 結果輸出統一在 results/result_YYYYMMDD.txt
+✅ 結合三家公司分析結果
 """
 
-
-import os, signal, regex as re
+import os, signal, regex as re, sys, io
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple, Dict
@@ -22,7 +19,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 設定 ----------
-SILENT_MODE = True
+SILENT_MODE = False        # ✅ 設為 False 才會印出內容
 MAX_DISPLAY_NEWS = 5
 
 def log(msg: str):
@@ -31,8 +28,6 @@ def log(msg: str):
 
 # ---------- 讀 .env ----------
 if os.path.exists(".env"):
-    load_dotenv(".env", override=True)
-else:
     load_dotenv(".env", override=True)
 
 # ---------- 常數 ----------
@@ -246,17 +241,6 @@ def groq_analyze(texts: List[str], target: str, force_direction: bool = False) -
         short_reason = "，".join(sentences[:2]).strip()
         short_reason = re.sub(r"\s+", " ", short_reason)[:40].strip("，,。")
 
-        if force_direction:
-            neg_keywords = ["破局", "退出", "延宕", "裁員", "停產", "虧損"]
-            pos_keywords = ["合作", "接單", "成長", "擴產", "ai", "併購"]
-            ltext = combined.lower()
-            if any(k in ltext for k in neg_keywords):
-                trend_with_symbol = "偏向下跌 🔽"
-            elif any(k in ltext for k in pos_keywords):
-                trend_with_symbol = "偏向上漲 🔼"
-            else:
-                trend_with_symbol = "偏向下跌 🔽"
-
         return f"明天{target}股價走勢：{trend_with_symbol}\n原因：{short_reason}"
 
     except Exception as e:
@@ -275,7 +259,8 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
     ]
 
     if not items:
-        return
+        print(f"[{target}] 找不到符合新聞")
+        return ""
 
     filtered, terminal_logs = [], []
     for it in items:
@@ -289,35 +274,40 @@ def analyze_target(db, news_col: str, target: str, result_col: str, force_direct
             truncated_title = first_n_sentences(it.get("title",""), 3)
             terminal_logs.append(f"[{it['id']}]\n標題：{truncated_title}\n{trend}\n命中：\n" + "\n".join(hits_text_lines) + "\n")
 
-    for t in terminal_logs[:MAX_DISPLAY_NEWS]:
-        print(t)
-
     summary = groq_analyze([(x[0].get("content") or x[0].get("title") or "") for x in filtered], target, force_direction)
-    print(summary)
 
-    os.makedirs("result", exist_ok=True)
-    local_path = f"result/{target}_{datetime.now(TAIWAN_TZ).strftime('%Y%m%d_%H%M%S')}.txt"
-    with open(local_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(terminal_logs))
-        f.write("\n" + "="*60 + "\n")
-        f.write(summary + "\n")
-
-    try:
-        db.collection(result_col).document(datetime.now(TAIWAN_TZ).strftime("%Y%m%d")).set({
-            "timestamp": datetime.now(TAIWAN_TZ),
-            "result": summary,
-        })
-    except Exception:
-        pass
+    output = "\n".join(terminal_logs[:MAX_DISPLAY_NEWS]) + "\n" + "="*60 + "\n" + summary + "\n"
+    print(output)
+    return output
 
 # ---------- 主程式 ----------
 def main():
     db = get_db()
-    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
-    print("\n" + "="*70 + "\n")
-    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon", force_direction=True)
-    print("\n" + "="*70 + "\n")
-    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC", force_direction=True)
+
+    os.makedirs("results", exist_ok=True)
+    today = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
+    output_path = f"results/result_{today}.txt"
+
+    buf = io.StringIO()
+    sys.stdout = buf
+
+    print("=== 股票新聞分析工具整合輸出 ===\n")
+
+    all_results = []
+    for target, col, result_col, force_dir in [
+        ("台積電", NEWS_COLLECTION_TSMC, "Groq_result", False),
+        ("鴻海", NEWS_COLLECTION_FOX, "Groq_result_Foxxcon", True),
+        ("聯電", NEWS_COLLECTION_UMC, "Groq_result_UMC", True),
+    ]:
+        print(f"\n===== {target} =====")
+        all_results.append(analyze_target(db, col, target, result_col, force_dir))
+        print("\n" + "="*70 + "\n")
+
+    sys.stdout = sys.__stdout__
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(buf.getvalue())
+
+    print(f"[info] 已輸出完整結果：{output_path}")
 
 if __name__ == "__main__":
     main()
