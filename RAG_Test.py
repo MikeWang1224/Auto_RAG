@@ -9,7 +9,7 @@
 ✅ Groq 失敗自動持平
 ✅ 執行速度最佳化
 """
- 
+
 import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 設定 ----------
-SILENT_MODE = False
+SILENT_MODE = True  # ✅ 設為 True 時不顯示 🚀 開始分析... 的提示
 SCORE_THRESHOLD = 1.5
 TAIWAN_TZ = timezone(timedelta(hours=8))
 MAX_DISPLAY_NEWS = 5
@@ -210,12 +210,16 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 
 # ---------- 主程式 ----------
 def main():
-    print("🚀 開始分析台股焦點股（僅今日新聞，分數 > 1.5）...\n")
+    if not SILENT_MODE:
+        print("🚀 開始分析台股焦點股（僅今日新聞，分數 > 1.5）...\n")
+
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
-    print("="*70)
+    if not SILENT_MODE:
+        print("="*70)
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
-    print("="*70)
+    if not SILENT_MODE:
+        print("="*70)
     analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
 
 if __name__ == "__main__":
