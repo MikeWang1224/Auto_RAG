@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-最終版：
-✅ 僅分析「今日」新聞
-✅ 只列入分數 > 1.5 的新聞
-✅ 命中 token 不重複
-✅ Firestore 寫回結果
-✅ Groq 失敗自動持平
+強化版：
+✅ 不再略過低分新聞，Groq 永遠會分析
+✅ 若 Groq 回「不明確」，依平均分數自動微調
+✅ 保留 token 命中顯示與 Firestore 回寫
 ✅ 執行速度最佳化
 ✅ 股票間輸出用 ======= 分隔
 """
- 
+
 import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,7 +18,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 設定 ----------
-SILENT_MODE = True  # True = 不顯示 🚀 開始分析訊息
+SILENT_MODE = True
 SCORE_THRESHOLD = 1.5
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
@@ -134,11 +132,10 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
 
 # ---------- Groq ----------
 def groq_analyze(news_list: List[str], target: str) -> str:
-    if not news_list:
-        return f"明天{target}股價走勢：持平 ⚖️\n原因：今日無顯著新聞"
     combined = "\n".join(f"{i+1}. {t}" for i, t in enumerate(news_list[:10]))
-    prompt = f"""你是一位台股分析師。根據以下{target}相關新聞，請簡短判斷明天{target}股價走勢：
-請僅回傳：
+    prompt = f"""你是一位專業台股分析師。根據以下{target}的今日新聞內容，
+請判斷明天{target}股價最可能的方向（上漲或下跌，如真的難判斷再選不明確）：
+回傳格式如下：
 明天{target}股價走勢：<上漲 / 下跌 / 不明確>
 原因：<一句話40字內>
 
@@ -151,7 +148,7 @@ def groq_analyze(news_list: List[str], target: str) -> str:
                 {"role": "system", "content": "你是專業股市分析師，回答簡潔準確。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.0,
+            temperature=0.1,
             max_tokens=100,
             timeout=20,
         )
@@ -173,6 +170,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 
     today_str = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
     filtered = []
+    avg_scores = []
 
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
@@ -185,19 +183,32 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             title, content = v.get("title", ""), v.get("content", "")
             full = title + " " + content
             res = score_text(full, pos_c, neg_c, target)
-            if abs(res.score) <= SCORE_THRESHOLD or not res.hits:
-                continue
+
+            if not res.hits:
+                continue  # 無命中公司名稱的跳過
             filtered.append((d.id, k, title, res))
+            avg_scores.append(res.score)
+
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
             hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
             print(f"[{d.id}#{k}]\n標題：{first_n_sentences(title)}\n{trend}\n命中：\n{hits_text}\n")
 
+    # ✅ 若完全沒有新聞，仍交給 Groq 判斷
     if not filtered:
-        print(f"{target}：持平 ⚖️（今日無顯著新聞）\n")
-        return
+        print(f"{target}：今日無新聞，交由 Groq 判斷。\n")
+        summary = groq_analyze(["今日無相關新聞，請依市場情緒估計。"], target)
+    else:
+        news_texts = [t for _, _, t, _ in filtered]
+        summary = groq_analyze(news_texts, target)
 
-    news_texts = [t for _, _, t, _ in filtered]
-    summary = groq_analyze(news_texts, target)
+        # ✅ 根據平均分數微調 Groq 結果方向
+        if avg_scores:
+            avg_score = sum(avg_scores) / len(avg_scores)
+            if avg_score > 1.5:
+                summary = re.sub(r"不明確", "上漲", summary)
+            elif avg_score < -1.5:
+                summary = re.sub(r"不明確", "下跌", summary)
+
     print(summary + "\n")
 
     try:
@@ -211,12 +222,11 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（僅今日新聞，分數 > 1.5）...\n")
+        print("🚀 開始分析台股焦點股（包含低分新聞）...\n")
 
     db = get_db()
-
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
-    print("=" * 70)  # ✅ 股票間分隔線
+    print("=" * 70)
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
     print("=" * 70)
     analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
