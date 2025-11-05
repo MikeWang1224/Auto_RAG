@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-最終版（絕對值最高前五則 + Firestore 寫回 + Groq 結論）：
-✅ 僅分析「今日 + 昨日」新聞（2天延遲效應）
-✅ 今日新聞權重 = 1.0、昨日 = 0.7
-✅ 取分數絕對值最高前五則送 Groq
-✅ 終端印出命中新聞（標題 + 命中 token）
-✅ 寫回 Firestore（Groq_result / Groq_result_Foxxcon / Groq_result_UMC）
-✅ 本地輸出 result_YYYYMMDD.txt
+情緒融合模式（準確率提升版）：
+✅ 維持 Firestore 寫回 + 本地 result.txt
+✅ Groq 同時考慮每則情緒分數 + 平均分數
+✅ 避免不明確判斷、整體趨勢更準
 """
 
 import os, signal, regex as re
@@ -131,13 +128,19 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
             seen.add(key)
     return MatchResult(score, hits)
 
-# ---------- Groq ----------
-def groq_analyze(news_list: List[str], target: str) -> str:
-    combined = "\n".join(f"{i+1}. {t}" for i, t in enumerate(news_list[:10]))
+# ---------- Groq（情緒融合模式） ----------
+def groq_analyze(news_list: List[Tuple[str, float]], target: str, avg_score: float) -> str:
+    if not news_list:
+        return f"明天{target}股價走勢：不明確 ⚖️\n原因：近兩日無相關新聞"
+
+    combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
     prompt = f"""你是一位專業台股分析師。根據以下{target}的近期新聞內容，
-請判斷明天{target}股價最可能的方向（上漲或下跌，如真的難判斷再選不明確）：
+每則新聞後方有情緒分數（正代表利多，負代表利空）。
+整體平均情緒分數為 {avg_score:+.2f}（越大越偏多，越小越偏空）。
+請綜合「新聞內容」與「整體情緒」判斷明天{target}股價最可能的方向。
+
 回傳格式如下：
-明天{target}股價走勢：<上漲 / 下跌 / 不明確>
+明天{target}股價走勢：<上漲 / 微漲 / 微跌 / 下跌 / 不明確>
 原因：<一句話40字內>
 
 {combined}
@@ -150,14 +153,14 @@ def groq_analyze(news_list: List[str], target: str) -> str:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=100,
-            timeout=20,
+            max_tokens=120,
+            timeout=25,
         )
         ans = resp.choices[0].message.content.strip()
         ans = re.sub(r"\s+", " ", ans)
-        m_trend = re.search(r"(上漲|下跌|不明確)", ans)
+        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
         trend = m_trend.group(1) if m_trend else "不明確"
-        symbol_map = {"上漲": "🔼", "下跌": "🔽", "不明確": "⚖️"}
+        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+)", ans)
         reason = m_reason.group(1) if m_reason else "市場觀望"
         return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason[:40]}"
@@ -170,8 +173,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
 
     today = datetime.now(TAIWAN_TZ).date()
-    filtered = []
-    weighted_scores = []
+    filtered, weighted_scores = [], []
 
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
@@ -197,34 +199,30 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 
     if not filtered:
         print(f"{target}：近兩日無新聞，交由 Groq 判斷。\n")
-        summary = groq_analyze(["近兩日無相關新聞，請依市場情緒估計。"], target)
+        summary = groq_analyze([], target, 0)
     else:
         # ✅ 取分數絕對值最高前 5 則
         filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
         top_news = filtered[:5]
-        news_texts = [t for _, _, t, _, _ in top_news]
 
         print(f"\n📰 {target} 絕對值最高前五則新聞：")
-        for i, (docid, key, title, res, weight) in enumerate(top_news, 1):
-            print(f"[{docid}#{key}] ({weight:.1f}x, 分數={res.score:.2f}) {title}")
+        for docid, key, title, res, weight in top_news:
+            print(f"[{docid}#{key}] ({weight:.1f}x, 分數={res.score:+.2f}) {title}")
             for p, w, n in res.hits:
                 print(f"   {'+' if w>0 else '-'} {p}（{n}）")
 
+        news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
+        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
+        summary = groq_analyze(news_with_scores, target, avg_score)
+
+        # txt輸出
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
             f.write(f"======= {target} =======\n")
             for docid, key, title, res, weight in top_news:
-                trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
                 hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
-                f.write(f"[{docid}#{key}]（{weight:.1f}x）\n標題：{first_n_sentences(title)}\n{trend}\n命中：\n{hits_text}\n\n")
-
-        summary = groq_analyze(news_texts, target)
-        if weighted_scores:
-            avg_score = sum(weighted_scores) / len(weighted_scores)
-            if avg_score > 1.5:
-                summary = re.sub(r"不明確", "上漲", summary)
-            elif avg_score < -1.5:
-                summary = re.sub(r"不明確", "下跌", summary)
+                f.write(f"[{docid}#{key}]（{weight:.1f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
+            f.write(summary + "\n\n")
 
     print(summary + "\n")
 
@@ -239,7 +237,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（絕對值最高前五則 + Firestore 寫回）...\n")
+        print("🚀 開始分析台股焦點股（情緒融合模式）...\n")
 
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
