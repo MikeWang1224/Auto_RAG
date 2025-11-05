@@ -5,7 +5,7 @@
 ✅ 分析「今日 + 昨日」新聞（2天延遲效應）
 ✅ 今日新聞權重 = 1.0、昨日 = 0.7
 ✅ 依加權後分數絕對值排序取前 5 則新聞送 Groq
-✅ 僅印出送進 Groq 的新聞（前五則）
+✅ 終端印出給 Groq 的新聞標題（方便確認）
 ✅ Groq 永遠會分析（即使無新聞）
 ✅ 若 Groq 回「不明確」，依加權平均分數自動微調
 ✅ 股票間輸出用 ======= 分隔
@@ -22,6 +22,7 @@ from groq import Groq
 # ---------- 設定 ----------
 SILENT_MODE = True
 TAIWAN_TZ = timezone(timedelta(hours=8))
+SCORE_THRESHOLD = 1.5
 
 TOKENS_COLLECTION = "bull_tokens"
 NEWS_COLLECTION_TSMC = "NEWS"
@@ -63,7 +64,7 @@ def get_db():
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
-def first_n_sentences(text: str, n: int = 2) -> str:
+def first_n_sentences(text: str, n: int = 3) -> str:
     if not text:
         return ""
     parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
@@ -195,41 +196,39 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             filtered.append((d.id, k, title, res, weight))
             weighted_scores.append(res.score * weight)
 
-    fname = f"result_{today.strftime('%Y%m%d')}.txt"
-
     # ✅ 若完全沒有新聞
     if not filtered:
         print(f"{target}：近兩日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze(["近兩日無相關新聞，請依市場情緒估計。"], target)
+    else:
+        # ✅ 取前五則（同 Groq）
+        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
+        top_news = filtered[:5]
+        news_texts = [t for _, _, t, _, _ in top_news]
+
+        # ✅ 給 Groq 的新聞列表（新增這段）
+        print(f"\n📰 給 Groq 分析的 {target} 前五則新聞：")
+        for i, (docid, key, title, res, weight) in enumerate(top_news, 1):
+            print(f"[{docid}#{key}] ({weight:.1f}x, 分數={res.score:.2f}) {title}")
+
+        # --- 輸出 .txt ---
+        fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
-            f.write(f"======= {target} =======\n{summary}\n\n")
-        return
+            f.write(f"======= {target} =======\n")
+            for docid, key, title, res, weight in top_news:
+                trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
+                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
+                f.write(f"[{docid}#{key}]（{weight:.1f}x）\n標題：{first_n_sentences(title)}\n{trend}\n命中：\n{hits_text}\n\n")
 
-    # ✅ 取前五則（同 Groq）
-    filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
-    top_news = filtered[:5]
-    news_texts = [t for _, _, t, _, _ in top_news]
+        summary = groq_analyze(news_texts, target)
 
-    # --- 僅印出送進 Groq 的新聞 ---
-    with open(fname, "a", encoding="utf-8") as f:
-        f.write(f"======= {target} =======\n")
-        for docid, key, title, res, weight in top_news:
-            trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
-            hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
-            f.write(f"[{docid}#{key}]\n標題：{first_n_sentences(title)}\n{trend}\n命中：\n{hits_text}\n\n")
-
-    summary = groq_analyze(news_texts, target)
-
-    # ✅ 根據平均分數微調
-    if weighted_scores:
-        avg_score = sum(weighted_scores) / len(weighted_scores)
-        if avg_score > 1.5:
-            summary = re.sub(r"不明確", "上漲", summary)
-        elif avg_score < -1.5:
-            summary = re.sub(r"不明確", "下跌", summary)
-
-    with open(fname, "a", encoding="utf-8") as f:
-        f.write(summary + "\n\n")
+        # ✅ 根據平均分數微調
+        if weighted_scores:
+            avg_score = sum(weighted_scores) / len(weighted_scores)
+            if avg_score > 1.5:
+                summary = re.sub(r"不明確", "上漲", summary)
+            elif avg_score < -1.5:
+                summary = re.sub(r"不明確", "下跌", summary)
 
     print(summary + "\n")
 
