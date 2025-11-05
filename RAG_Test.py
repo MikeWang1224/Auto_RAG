@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-強化版：
+加強版（含延遲效應時間窗）：
+✅ 分析「今日 + 昨日」新聞（2天延遲效應）
+✅ 今日新聞權重 = 1.0、昨日 = 0.7
 ✅ 不再略過低分新聞，Groq 永遠會分析
-✅ 若 Groq 回「不明確」，依平均分數自動微調
-✅ 保留 token 命中顯示與 Firestore 回寫
-✅ 執行速度最佳化
+✅ 若 Groq 回「不明確」，依加權平均分數自動微調
 ✅ 股票間輸出用 ======= 分隔
 """
- 
+
 import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,8 +19,8 @@ from groq import Groq
 
 # ---------- 設定 ----------
 SILENT_MODE = True
-SCORE_THRESHOLD = 1.5
 TAIWAN_TZ = timezone(timedelta(hours=8))
+SCORE_THRESHOLD = 1.5
 
 TOKENS_COLLECTION = "bull_tokens"
 NEWS_COLLECTION_TSMC = "NEWS"
@@ -133,7 +133,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
 # ---------- Groq ----------
 def groq_analyze(news_list: List[str], target: str) -> str:
     combined = "\n".join(f"{i+1}. {t}" for i, t in enumerate(news_list[:10]))
-    prompt = f"""你是一位專業台股分析師。根據以下{target}的今日新聞內容，
+    prompt = f"""你是一位專業台股分析師。根據以下{target}的近期新聞內容，
 請判斷明天{target}股價最可能的方向（上漲或下跌，如真的難判斷再選不明確）：
 回傳格式如下：
 明天{target}股價走勢：<上漲 / 下跌 / 不明確>
@@ -168,14 +168,24 @@ def analyze_target(db, collection: str, target: str, result_field: str):
     pos, neg = load_tokens(db)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
 
-    today_str = datetime.now(TAIWAN_TZ).strftime("%Y%m%d")
+    today = datetime.now(TAIWAN_TZ).date()
     filtered = []
-    avg_scores = []
+    weighted_scores = []
 
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
-        if not dt or dt.strftime("%Y%m%d") != today_str:
+        if not dt:
             continue
+        news_date = dt.date()
+        delta_days = (today - news_date).days
+
+        # ✅ 僅保留「今日 + 昨日」新聞
+        if delta_days > 1:
+            continue
+
+        # ✅ 加權（今日=1.0、昨日=0.7）
+        weight = 1.0 if delta_days == 0 else 0.7
+
         data = d.to_dict() or {}
         for k, v in data.items():
             if not isinstance(v, dict):
@@ -187,23 +197,23 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             if not res.hits:
                 continue  # 無命中公司名稱的跳過
             filtered.append((d.id, k, title, res))
-            avg_scores.append(res.score)
+            weighted_scores.append(res.score * weight)
 
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
             hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
-            print(f"[{d.id}#{k}]\n標題：{first_n_sentences(title)}\n{trend}\n命中：\n{hits_text}\n")
+            print(f"[{d.id}#{k}]（{news_date}）\n標題：{first_n_sentences(title)}\n{trend}\n命中：\n{hits_text}\n")
 
     # ✅ 若完全沒有新聞，仍交給 Groq 判斷
     if not filtered:
-        print(f"{target}：今日無新聞，交由 Groq 判斷。\n")
-        summary = groq_analyze(["今日無相關新聞，請依市場情緒估計。"], target)
+        print(f"{target}：近兩日無新聞，交由 Groq 判斷。\n")
+        summary = groq_analyze(["近兩日無相關新聞，請依市場情緒估計。"], target)
     else:
         news_texts = [t for _, _, t, _ in filtered]
         summary = groq_analyze(news_texts, target)
 
-        # ✅ 根據平均分數微調 Groq 結果方向
-        if avg_scores:
-            avg_score = sum(avg_scores) / len(avg_scores)
+        # ✅ 根據加權平均分數微調 Groq 結果方向
+        if weighted_scores:
+            avg_score = sum(weighted_scores) / len(weighted_scores)
             if avg_score > 1.5:
                 summary = re.sub(r"不明確", "上漲", summary)
             elif avg_score < -1.5:
@@ -212,7 +222,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
     print(summary + "\n")
 
     try:
-        db.collection(result_field).document(today_str).set({
+        db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
             "result": summary,
         })
@@ -222,7 +232,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（包含低分新聞）...\n")
+        print("🚀 開始分析台股焦點股（2天延遲效應版）...\n")
 
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
