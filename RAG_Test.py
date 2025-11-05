@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-加強版（含延遲效應時間窗）：
+加強版（含延遲效應時間窗 + 高權重新聞前五則優先）：
 ✅ 分析「今日 + 昨日」新聞（2天延遲效應）
 ✅ 今日新聞權重 = 1.0、昨日 = 0.7
-✅ 不再略過低分新聞，Groq 永遠會分析
+✅ 依加權後分數絕對值排序取前 5 則新聞送 Groq
+✅ Groq 永遠會分析（即使無新聞）
 ✅ 若 Groq 回「不明確」，依加權平均分數自動微調
 ✅ 股票間輸出用 ======= 分隔
 """
@@ -196,7 +197,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 
             if not res.hits:
                 continue  # 無命中公司名稱的跳過
-            filtered.append((d.id, k, title, res))
+            filtered.append((d.id, k, title, res, weight))
             weighted_scores.append(res.score * weight)
 
             trend = "✅ 明日可能大漲" if res.score > 0 else "❌ 明日可能下跌"
@@ -208,7 +209,11 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         print(f"{target}：近兩日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze(["近兩日無相關新聞，請依市場情緒估計。"], target)
     else:
-        news_texts = [t for _, _, t, _ in filtered]
+        # ✅ 按加權後分數絕對值排序，取前五則
+        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
+        top_news = filtered[:5]
+        news_texts = [t for _, _, t, _, _ in top_news]
+
         summary = groq_analyze(news_texts, target)
 
         # ✅ 根據加權平均分數微調 Groq 結果方向
@@ -232,7 +237,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（2天延遲效應版）...\n")
+        print("🚀 開始分析台股焦點股（2天延遲效應版 + 前五則高權重新聞）...\n")
 
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
