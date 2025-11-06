@@ -212,7 +212,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
         top_news = filtered[:5]
 
-        print(f"\n📰 {target} 絕對值最高前五則新聞：")
+        print(f"\n📰 {target} 近期重點新聞：")#絕對值前五高的新聞
         for docid, key, title, res, weight in top_news:
             print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}) {title}")
             for p, w, n in res.hits:
