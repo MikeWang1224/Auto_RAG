@@ -5,6 +5,7 @@
 ✅ Firestore 寫回 + 本地 result.txt
 ✅ Groq 同時考慮每則情緒分數 + 平均分數
 ✅ 命中多則新聞時提升穩定度
+✅ 新增：支援 3 天內新聞（延遲效應）
 """
 
 import os, signal, regex as re
@@ -131,7 +132,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
 # ---------- Groq（情緒融合 + 準確率強化） ----------
 def groq_analyze(news_list: List[Tuple[str, float]], target: str, avg_score: float) -> str:
     if not news_list:
-        return f"明天{target}股價走勢：不明確 ⚖️\n原因：近兩日無相關新聞"
+        return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞"
 
     combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
     prompt = f"""你是一位台股分析師。
@@ -185,9 +186,18 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             continue
         news_date = dt.date()
         delta_days = (today - news_date).days
-        if delta_days > 1:
+
+        # 延長時間窗（支援 1~2 天延遲效應，最多取 3 天內）
+        if delta_days > 2:
             continue
-        day_weight = 1.0 if delta_days == 0 else 0.7
+
+        # 根據時間給不同權重（越久影響越弱）
+        if delta_days == 0:
+            day_weight = 1.0   # 今日新聞權重最高
+        elif delta_days == 1:
+            day_weight = 0.85  # 昨日稍弱
+        else:
+            day_weight = 0.7   # 前天再弱一些
 
         data = d.to_dict() or {}
         for k, v in data.items():
@@ -206,13 +216,13 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             weighted_scores.append(res.score * total_weight)
 
     if not filtered:
-        print(f"{target}：近兩日無新聞，交由 Groq 判斷。\n")
+        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze([], target, 0)
     else:
         filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
         top_news = filtered[:5]
 
-        print(f"\n📰 {target} 近期重點新聞：")#絕對值前五高的新聞
+        print(f"\n📰 {target} 近期重點新聞：")
         for docid, key, title, res, weight in top_news:
             print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}) {title}")
             for p, w, n in res.hits:
