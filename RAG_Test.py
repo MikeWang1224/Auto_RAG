@@ -220,7 +220,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         summary = groq_analyze([], target, 0)
     else:
         filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
-        top_news = filtered[:5]
+        top_news = filtered[:10]
 
         print(f"\n📰 {target} 近期重點新聞：")
         for docid, key, title, res, weight in top_news:
