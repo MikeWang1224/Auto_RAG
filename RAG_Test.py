@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-準確率極致版（短期預測特化）
+準確率極致版（短期預測特化） - 強制理由 Prompt 版本
 ✅ 嚴格依據情緒分數決策
 ✅ 敏感詞加權（法說 / 財報 / 新品 / 停工等）
 ✅ 支援 3 日延遲效應
@@ -54,7 +54,6 @@ if os.path.exists(".env"):
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # ---------- 結構 ----------
-from dataclasses import dataclass
 @dataclass
 class Token:
     polarity: str
@@ -140,34 +139,37 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
             seen.add(key)
     return MatchResult(score, hits)
 
-# ---------- Groq（嚴格邏輯版） ----------
+# ---------- Groq（嚴格邏輯 + 強制理由版） ----------
 def groq_analyze(news_list, target, avg_score):
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
 
     combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
+    
+    # 強制理由的 prompt（明確要求所有欄位必出現）
     prompt = f"""
-你是一位金融數據分析師。請依下列規則嚴格推論「{target}」明日股價方向：
+你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
+依情緒分數與內容趨勢，**嚴格推論明日股價方向**。
+無論結果為何，都必須明確說明「原因」。
 
-1️⃣ 整體情緒分數計算方式：
-   - 每則新聞分數（括號中）為利多/利空權重。
-   - 平均後加總成整體情緒分數（-10 ~ +10）。
-
-2️⃣ 嚴格依下列規則決定股價方向：
+分析規則如下：
+1️⃣ 情緒分數為每則新聞的利多 / 利空加權值（括號中）。
+2️⃣ 平均後得整體情緒分數（範圍 -10 ~ +10）。
+3️⃣ 請根據以下邏輯判定方向：
    分數 ≥ +2 → 上漲 🔼
    +0.5 ≤ 分數 < +2 → 微漲 ↗️
    -0.5 < 分數 < +0.5 → 不明確 ⚖️
    -2 < 分數 ≤ -0.5 → 微跌 ↘️
    分數 ≤ -2 → 下跌 🔽
+4️⃣ 無論趨勢為何，**務必輸出「原因」**，即使是不明確，也要說明主因（如「多空消息交錯」「缺乏關鍵事件」等）。
 
-3️⃣ 只依據數據決策，不可自由推測。
-輸出格式如下：
-明天{target}股價走勢：<方向>（附符號）
-原因：<一句40字內>
-情緒分數：<整數 -10~+10>
+請用以下格式回答，所有欄位必須出現：
+明天{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
+原因：{{必填，一句 40 字內，說明主要情緒來源}}
+情緒分數：{{整數 -10~+10}}
 
 整體平均情緒分數：{avg_score:+.2f}
-以下為新聞摘要（含分數）：
+以下是新聞摘要（含分數）：
 {combined}
 """
 
@@ -175,24 +177,44 @@ def groq_analyze(news_list, target, avg_score):
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "你是台股量化分析員，必須依照情緒分數規則輸出結果。"},
+                {"role": "system", "content": "你是台股量化分析員，需根據情緒分數規則產生明確結論。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.1,
-            max_tokens=200,
+            temperature=0.15,
+            max_tokens=220,
         )
         ans = resp.choices[0].message.content.strip()
         ans = re.sub(r"\s+", " ", ans)
 
-        m_trend = re.search(r"(上漲|下跌|微漲|微跌|不明確)", ans)
+        # 提取趨勢
+        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
         trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
 
+        # 提取理由（若缺，補預設）
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        reason = m_reason.group(1).strip() if m_reason else "市場觀望"
+        if m_reason and m_reason.group(1).strip():
+            reason = m_reason.group(1).strip()
+        else:
+            # 自動補理由（依 avg_score 產生可讀的 fallback）
+            if avg_score >= 3:
+                reason = "多則新聞偏向利多，如營收/合作/技術突破。"
+            elif avg_score >= 1:
+                reason = "整體氣氛略偏多，市場信心回升。"
+            elif avg_score <= -3:
+                reason = "多則新聞利空明顯，如跌停或產能問題。"
+            elif avg_score <= -1:
+                reason = "多則新聞偏向利空，如獲利下滑或股價走弱。"
+            else:
+                reason = "利多與利空交錯，市場短線觀望。"
 
+        # 提取情緒分數（若缺，用 avg_score 轉換為 -10~+10）
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
-        mood_score = int(m_score.group(1)) if m_score else 0
+        if m_score:
+            mood_score = int(m_score.group(1))
+        else:
+            # avg_score 範圍通常小，放大到 -10~+10，然後四捨五入
+            mood_score = max(-10, min(10, int(round(avg_score * 3))))
 
         return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
 
@@ -227,7 +249,8 @@ def analyze_target(db, collection, target, result_field):
                 continue
 
             token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
-            impact = 1.0 + sum(w * 0.05 for k, w in SENSITIVE_WORDS.items() if k in full)
+            # 計算敏感詞衝擊（若出現在全文就累加）
+            impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
             total_weight = day_weight * token_weight * impact
 
             filtered.append((d.id, k, title, res, total_weight))
@@ -242,7 +265,7 @@ def analyze_target(db, collection, target, result_field):
 
         print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
         for docid, key, title, res, weight in top_news:
-            impact = sum(w for k, w in SENSITIVE_WORDS.items() if k in title)
+            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
             print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title}")
             for p, w, n in res.hits:
                 print(f"   {'+' if w>0 else '-'} {p}（{n}）")
@@ -250,6 +273,15 @@ def analyze_target(db, collection, target, result_field):
         news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
         avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
         summary = groq_analyze(news_with_scores, target, avg_score)
+
+        # 寫本地檔案（方便檢查）
+        fname = f"result_{today.strftime('%Y%m%d')}.txt"
+        with open(fname, "a", encoding="utf-8") as f:
+            f.write(f"======= {target} =======\n")
+            for docid, key, title, res, weight in top_news:
+                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
+                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
+            f.write(summary + "\n\n")
 
     print(summary + "\n")
 
