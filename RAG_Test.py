@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-輸出格式精確版（完全模仿示範範例）
+輸出格式精簡版：取用新聞 + 偏向 + 總分
 """
 
 import os, signal, regex as re
@@ -46,22 +46,11 @@ class Token:
     weight: float
     note: str
 
-@dataclass
-class MatchResult:
-    score: float
-    hits: List[Tuple[str, float, str]]
-
 def get_db():
     return firestore.Client()
 
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
-
-def first_n_sentences(text: str, n: int = 3) -> str:
-    if not text:
-        return ""
-    parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
-    return "".join(parts[:n]) + ("..." if len(parts) > n else "")
 
 def parse_docid_time(doc_id: str):
     m = re.match(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$", doc_id or "")
@@ -101,25 +90,20 @@ def compile_tokens(tokens: List[Token]):
             compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
     return compiled
 
-def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
+def score_text(text: str, pos_c, neg_c, target: str = None) -> float:
     norm = normalize(text)
-    score, hits, seen = 0.0, [], set()
+    score = 0.0
     aliases = {"台積電": ["台積電", "tsmc", "2330"],
                "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
                "聯電": ["聯電", "umc", "2303"]}
     company_pattern = "|".join(re.escape(a) for a in aliases.get(target, []))
     if not re.search(company_pattern, norm):
-        return MatchResult(0.0, [])
+        return 0.0
     for ttype, cre, w, note, patt in pos_c + neg_c:
-        key = (patt, note)
-        if key in seen:
-            continue
         matched = cre.search(norm) if ttype == "regex" else patt in norm
         if matched:
             score += w
-            hits.append((patt, w, note))
-            seen.add(key)
-    return MatchResult(score, hits)
+    return score
 
 def adjust_score_for_context(text: str, base_score: float) -> float:
     if not text or base_score == 0:
@@ -136,51 +120,13 @@ def adjust_score_for_context(text: str, base_score: float) -> float:
         base_score *= 1.3
     return base_score
 
-# ---------- Groq ----------
-def groq_analyze(news_list, target, avg_score):
-    if not news_list:
-        return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
-    combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
-    prompt = f"""
-你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
-依情緒分數與內容趨勢，嚴格推論明日股價方向。必須說明原因。
-整體平均情緒分數：{avg_score:+.2f}
-以下是新聞摘要（含分數）：
-{combined}
-"""
-    try:
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "你是台股量化分析員，需產生明確結論。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.15,
-            max_tokens=220,
-        )
-        ans = resp.choices[0].message.content.strip()
-        ans = re.sub(r"\s+", " ", ans)
-
-        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
-        trend = m_trend.group(1) if m_trend else "不明確"
-        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
-
-        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        reason = m_reason.group(1).strip() if m_reason else "利多與利空交錯，市場短線觀望。"
-
-        m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
-        mood_score = int(m_score.group(1)) if m_score else max(-10, min(10, int(round(avg_score*3))))
-
-        return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
-    except Exception as e:
-        return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
-
+# ---------- 分析函式 ----------
 def analyze_target(db, collection, target, result_field):
     pos, neg = load_tokens(db)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     today = datetime.now(TAIWAN_TZ).date()
 
-    filtered, weighted_scores = [], []
+    filtered = []
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt: continue
@@ -193,53 +139,50 @@ def analyze_target(db, collection, target, result_field):
             if not isinstance(v, dict): continue
             title, content = v.get("title", ""), v.get("content", "")
             full = title + " " + content
-            res = score_text(full, pos_c, neg_c, target)
-            if not res.hits: continue
-            adj_score = adjust_score_for_context(full, res.score)
-            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
-            impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
-            total_weight = day_weight * token_weight * impact
-            filtered.append((d.id, k, title, res, total_weight))
-            weighted_scores.append(adj_score * total_weight)
+            score = score_text(full, pos_c, neg_c, target)
+            if score == 0: continue
+            adj_score = adjust_score_for_context(full, score)
+            filtered.append((d.id, k, title, adj_score * day_weight))
 
-    if not filtered:
-        summary = groq_analyze([], target, 0)
-    else:
-        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
+    if filtered:
+        filtered.sort(key=lambda x: abs(x[3]), reverse=True)
         top_news = filtered[:10]
 
-        print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
-        for docid, key, title, res, weight in top_news:
-            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
-            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title}")
-            for p, w, n in res.hits:
-                print(f"   {'+' if w>0 else '-'} {p}（{n}）")
+        print(f"\n📰 {target} 近期重點新聞（取用）：")
+        for docid, key, title, _ in top_news:
+            print(f"[{docid}#{key}] {title}")
 
-        news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
-        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
-        summary = groq_analyze(news_with_scores, target, avg_score)
+        avg_score = sum(s for _, _, _, s in top_news) / len(top_news)
+        if avg_score >= 2:
+            trend = "上漲 🔼"
+        elif 0 < avg_score < 2:
+            trend = "微漲 ↗️"
+        elif -2 < avg_score <= 0:
+            trend = "微跌 ↘️"
+        elif avg_score <= -2:
+            trend = "下跌 🔽"
+        else:
+            trend = "不明確 ⚖️"
 
-        fname = f"result_{today.strftime('%Y%m%d')}.txt"
-        with open(fname, "a", encoding="utf-8") as f:
-            f.write("="*70 + "\n")
-            f.write(f"📰 {target} 近期重點新聞（含衝擊）：\n")
-            for docid, key, title, res, weight in top_news:
-                f.write(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title}\n")
-                for p, w, n in res.hits:
-                    f.write(f"   {'+' if w>0 else '-'} {p}（{n}）\n")
-            f.write(summary + "\n\n")
-            f.write("="*70 + "\n")
+        print(f"\n明日偏向：{trend}")
+        print(f"總分：{int(round(avg_score))}\n")
 
-    print(summary + "\n")
+        try:
+            db.collection(result_field).document(today.strftime("%Y%m%d")).set({
+                "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
+                "trend": trend,
+                "score": int(round(avg_score)),
+                "news_list": [{"docid": d, "key": k, "title": t} for d, k, t, _ in top_news]
+            })
+        except Exception as e:
+            print(f"[warning] Firestore 寫回失敗：{e}")
 
-    try:
-        db.collection(result_field).document(today.strftime("%Y%m%d")).set({
-            "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
-            "result": summary,
-        })
-    except Exception as e:
-        print(f"[warning] Firestore 寫回失敗：{e}")
+    else:
+        print(f"\n📰 {target} 近期重點新聞：無可用新聞")
+        print(f"明日偏向：不明確 ⚖️")
+        print(f"總分：0\n")
 
+# ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
         print("🚀 開始分析台股焦點股...\n")
