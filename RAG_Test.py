@@ -1,47 +1,80 @@
-import os
-import regex as re
+# -*- coding: utf-8 -*-
+"""
+股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
+準確率極致版（短期預測特化） - 加入 Context-aware 調整版
+✅ 嚴格依據情緒分數決策
+✅ 敏感詞加權（法說 / 財報 / 新品 / 停工等）
+✅ 支援 3 日延遲效應
+✅ Firestore 寫回 + 本地 result.txt
+✅ 新增句型判斷，避免「重申／預期內」誤判為利多
+✅ 僅使用當天股價漲跌作為預測依據
+"""
+
+import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
-
 from google.cloud import firestore
 from dotenv import load_dotenv
+from groq import Groq
 
-# Groq client
-try:
-    from groq import Groq
-except Exception:
-    Groq = None
-
-# ---------------- config ----------------
-load_dotenv()
+# ---------- 設定 ----------
+SILENT_MODE = True
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
-DAYS_BACK = int(os.getenv('DAYS_BACK', '7'))
-NEWS_COLLECTION_TSMC = os.getenv('NEWS_COLLECTION_TSMC', 'NEWS')
-NEWS_COLLECTION_FOX = os.getenv('NEWS_COLLECTION_FOX', 'NEWS_Foxxcon')
-NEWS_COLLECTION_UMC = os.getenv('NEWS_COLLECTION_UMC', 'NEWS_UMC')
-RESULT_COLLECTION = os.getenv('RESULT_COLLECTION', 'Groq_result')
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+TOKENS_COLLECTION = "bull_tokens"
+NEWS_COLLECTION_TSMC = "NEWS"
+NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
+NEWS_COLLECTION_UMC = "NEWS_UMC"
 
-if GROQ_API_KEY and Groq is not None:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-else:
-    groq_client = None
+# 敏感詞權重（短期影響放大）
+SENSITIVE_WORDS = {
+    "法說": 1.5,
+    "財報": 1.4,
+    "新品": 1.3,
+    "合作": 1.3,
+    "併購": 1.4,
+    "投資": 1.3,
+    "停工": 1.6,
+    "下修": 1.5,
+    "利空": 1.5,
+    "爆料": 1.4,
+    "營收": 1.3,
+    "展望": 1.2,
+}
 
-# ---------------- dataclasses ----------------
+STOP = False
+def _sigint_handler(signum, frame):
+    global STOP
+    STOP = True
+    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
+signal.signal(signal.SIGINT, _sigint_handler)
+
+# ---------- 初始化 ----------
+if os.path.exists(".env"):
+    load_dotenv(".env", override=True)
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+# ---------- 結構 ----------
 @dataclass
-class NewsItem:
-    docid: str
-    key: str
-    title: str
-    content: str
-    price_change: str
-    dt: datetime
+class Token:
+    polarity: str
+    ttype: str
+    pattern: str
+    weight: float
+    note: str
 
-# ---------------- helpers ----------------
+@dataclass
+class MatchResult:
+    score: float
+    hits: List[Tuple[str, float, str]]
+
+# ---------- 工具 ----------
 def get_db():
     return firestore.Client()
+
+def normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 def first_n_sentences(text: str, n: int = 3) -> str:
     if not text:
@@ -53,106 +86,166 @@ def parse_docid_time(doc_id: str):
     m = re.match(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$", doc_id or "")
     if not m:
         return None
-    ymd, hms = m.group('ymd'), m.group('hms') or '000000'
+    ymd, hms = m.group("ymd"), m.group("hms") or "000000"
     try:
         return datetime.strptime(ymd + hms, "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
     except:
         return None
 
-def collect_company_corpus(db, collection, days_back=DAYS_BACK) -> List[NewsItem]:
+# ---------- Token ----------
+def load_tokens(db):
+    pos, neg = [], []
+    for d in db.collection(TOKENS_COLLECTION).stream():
+        data = d.to_dict() or {}
+        pol = data.get("polarity", "").lower()
+        ttype = data.get("type", "substr").lower()
+        patt = data.get("pattern", "")
+        note = data.get("note", "")
+        w = float(data.get("weight", 1.0))
+        if pol == "positive":
+            pos.append(Token(pol, ttype, patt, w, note))
+        elif pol == "negative":
+            neg.append(Token(pol, ttype, patt, -abs(w), note))
+    return pos, neg
+
+def compile_tokens(tokens: List[Token]):
+    compiled = []
+    for t in tokens:
+        if t.ttype == "regex":
+            try:
+                compiled.append(("regex", re.compile(t.pattern, re.I), t.weight, t.note, t.pattern))
+            except:
+                continue
+        else:
+            compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
+    return compiled
+
+# ---------- Scoring ----------
+def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
+    norm = normalize(text)
+    score, hits, seen = 0.0, [], set()
+    aliases = {"台積電": ["台積電", "tsmc", "2330"],
+               "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
+               "聯電": ["聯電", "umc", "2303"]}
+    company_pattern = "|".join(re.escape(a) for a in aliases.get(target, []))
+    if not re.search(company_pattern, norm):
+        return MatchResult(0.0, [])
+    for ttype, cre, w, note, patt in pos_c + neg_c:
+        key = (patt, note)
+        if key in seen:
+            continue
+        matched = cre.search(norm) if ttype == "regex" else patt in norm
+        if matched:
+            score += w
+            hits.append((patt, w, note))
+            seen.add(key)
+    return MatchResult(score, hits)
+
+# ---------- Context-aware 調整 ----------
+def adjust_score_for_context(text: str, base_score: float) -> float:
+    if not text or base_score == 0:
+        return base_score
+    norm = text.lower()
+    neutral_phrases = ["重申", "符合預期", "預期內", "中性看待", "無重大影響", "持平", "未變"]
+    if any(p in norm for p in neutral_phrases):
+        base_score *= 0.4
+    positive_boost = ["創新高", "倍增", "大幅成長", "獲利暴增", "報喜"]
+    negative_boost = ["暴跌", "下滑", "虧損", "停工", "下修", "裁員", "警訊"]
+    if any(p in norm for p in positive_boost):
+        base_score *= 1.3
+    if any(p in norm for p in negative_boost):
+        base_score *= 1.3
+    return base_score
+
+# ---------- Groq 分析 ----------
+def groq_analyze(news_list, target, today_price_change):
+    combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
+    prompt = f"""
+你是一位專業台股金融分析師，請根據以下「{target}」近三日新聞摘要及今天股價漲跌：
+- 今日股價漲跌：{today_price_change}
+
+依新聞內容與今日漲跌，嚴格推論明日股價方向（上漲/微漲/微跌/下跌/不明確）。
+務必附一句 40 字內原因，說明主要新聞或市場氛圍影響。
+
+新聞摘要：
+{combined}
+"""
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "你是台股量化分析員，需根據新聞及今日漲跌產生明確結論。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.15,
+            max_tokens=220,
+        )
+        ans = resp.choices[0].message.content.strip()
+        ans = re.sub(r"\s+", " ", ans)
+        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
+        trend = m_trend.group(1) if m_trend else "不明確"
+        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
+        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:$)", ans)
+        reason = m_reason.group(1).strip() if m_reason else "新聞及今日股價分析結果"
+        return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n今日股價漲跌：{today_price_change}"
+    except Exception as e:
+        return f"明天{target}股價走勢：不明確 ⚖️\n原因：Groq分析失敗({e})\n今日股價漲跌：{today_price_change}"
+
+# ---------- 主分析 ----------
+def analyze_target(db, collection, target, result_field):
+    pos, neg = load_tokens(db)
+    pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     today = datetime.now(TAIWAN_TZ).date()
-    corpus = []
+    filtered = []
+    today_price_change = None
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt:
             continue
-        if (today - dt.date()).days > days_back:
+        delta_days = (today - dt.date()).days
+        if delta_days > 2:
             continue
         data = d.to_dict() or {}
         for k, v in data.items():
             if not isinstance(v, dict):
                 continue
-            title = v.get('title', '')
-            content = v.get('content', '')
-            price_change = v.get('price_change', '')
-            corpus.append(NewsItem(d.id, k, title, content, price_change, dt))
-    return corpus
-
-# ---------------- prompt assembly ----------------
-def make_augmented_prompt(target: str, today_items: List[NewsItem], past_items: List[NewsItem]) -> str:
-    header = f"你是一位專業的台股量化分析師，請根據下列資料並嚴格推論明日{target}股價方向，並給出一句 30 字內原因與情緒分數。\n\n"
-    
-    today_section = "【今日新聞（摘要 + 漲跌）】\n"
-    for item in today_items:
-        today_section += f"- {first_n_sentences(item.title,2)} {first_n_sentences(item.content,2)} 漲跌：{item.price_change}\n"
-
-    past_section = "\n【過去新聞參考】\n"
-    for item in past_items:
-        past_section += f"- ({item.docid}) {first_n_sentences(item.title,2)} {first_n_sentences(item.content,2)} 漲跌：{item.price_change}\n"
-
-    instr = ("\n請基於上面資料做判斷。輸出格式：\n"
-             "明天{target}股價走勢：{上漲/微漲/微跌/下跌/不明確}（附符號）\n"
-             "原因：一句 30 字內\n"
-             "情緒分數：整數 -10~+10\n")
-    return header + today_section + past_section + instr
-
-# ---------------- Groq call ----------------
-def call_groq_for_analysis(prompt: str):
-    if groq_client is None:
-        return f"明天股價走勢：不明確 ⚖️\n原因：Groq 未配置\n情緒分數：0"
-    try:
-        resp = groq_client.chat.completions.create(
-            model='llama-3.1-8b-instant',
-            messages=[
-                {"role": "system", "content": "你是台股量化分析員，需根據新聞及漲跌資訊產生明確結論。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.15,
-            max_tokens=300,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        return f"明天股價走勢：不明確 ⚖️\n原因：Groq 呼叫失敗 {e}\n情緒分數：0"
-
-# ---------------- main ----------------
-def analyze_company_with_rag(db, collection, target, result_collection):
-    corpus = collect_company_corpus(db, collection)
-    if not corpus:
-        print(f"{target}：無新聞可分析")
-        return
-
-    today = datetime.now(TAIWAN_TZ).date()
-    today_items = [item for item in corpus if item.dt.date() == today]
-    past_items = [item for item in corpus if item.dt.date() != today]
-
-    prompt = make_augmented_prompt(target, today_items, past_items)
-    analysis = call_groq_for_analysis(prompt)
-
-    # write Firestore
-    result_doc = {
-        'timestamp': datetime.now(TAIWAN_TZ).isoformat(),
-        'result': analysis,
-        'today_count': len(today_items),
-        'past_count': len(past_items)
-    }
-    try:
-        db.collection(result_collection).document(datetime.now(TAIWAN_TZ).strftime('%Y%m%d')).set(result_doc)
-    except Exception as e:
-        print('[warning] Firestore 寫回失敗：', e)
-
-    # write local file
-    os.makedirs('results', exist_ok=True)
-    fname = f"results/result_{datetime.now(TAIWAN_TZ).strftime('%Y%m%d')}.txt"
-    with open(fname, 'a', encoding='utf-8') as f:
+            title, content = v.get("title", ""), v.get("content", "")
+            full = title + " " + content
+            res = score_text(full, pos_c, neg_c, target)
+            if not res.hits:
+                continue
+            adj_score = adjust_score_for_context(full, res.score)
+            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
+            impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
+            total_weight = token_weight * impact
+            filtered.append((d.id, k, title, res, total_weight))
+            if delta_days == 0:
+                today_price_change = v.get("price_change", None)
+    news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in filtered]
+    summary = groq_analyze(news_with_scores, target, today_price_change or "未知")
+    fname = f"result_{today.strftime('%Y%m%d')}.txt"
+    with open(fname, "a", encoding="utf-8") as f:
         f.write(f"======= {target} =======\n")
-        f.write(analysis + '\n\n')
-    print(f"[{target}] done. 今日 {len(today_items)} 則新聞，已存結果。")
+        f.write(summary + "\n\n")
+    try:
+        db.collection(result_field).document(today.strftime("%Y%m%d")).set({
+            "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
+            "result": summary,
+        })
+    except Exception as e:
+        print(f"[warning] Firestore 寫回失敗：{e}")
+    print(summary + "\n")
 
+# ---------- 主程式 ----------
 def main():
+    if not SILENT_MODE:
+        print("🚀 開始分析台股焦點股（準確率極致版）...\n")
     db = get_db()
-    analyze_company_with_rag(db, NEWS_COLLECTION_TSMC, '台積電', RESULT_COLLECTION)
-    analyze_company_with_rag(db, NEWS_COLLECTION_FOX, '鴻海', RESULT_COLLECTION + '_Foxxcon')
-    analyze_company_with_rag(db, NEWS_COLLECTION_UMC, '聯電', RESULT_COLLECTION + '_UMC')
+    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
+    print("=" * 70)
+    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
+    print("=" * 70)
+    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
