@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-輸出格式精簡版：取用新聞 + 偏向 + 總分
+準確率極致版（短期預測特化） - 加入 Context-aware 調整版
+✅ 嚴格依據情緒分數決策
+✅ 敏感詞加權（法說 / 財報 / 新品 / 停工等）
+✅ 支援 3 日延遲效應
+✅ Firestore 寫回 + 本地 result.txt
+✅ 新增句型判斷，避免「重申／預期內」誤判為利多
 """
 
 import os, signal, regex as re
@@ -12,6 +17,7 @@ from google.cloud import firestore
 from dotenv import load_dotenv
 from groq import Groq
 
+# ---------- 設定 ----------
 SILENT_MODE = True
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
@@ -20,10 +26,20 @@ NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
 
+# 敏感詞權重（短期影響放大）
 SENSITIVE_WORDS = {
-    "法說": 1.5, "財報": 1.4, "新品": 1.3, "合作": 1.3, "併購": 1.4,
-    "投資": 1.3, "停工": 1.6, "下修": 1.5, "利空": 1.5, "爆料": 1.4,
-    "營收": 1.3, "展望": 1.2,
+    "法說": 1.5,
+    "財報": 1.4,
+    "新品": 1.3,
+    "合作": 1.3,
+    "併購": 1.4,
+    "投資": 1.3,
+    "停工": 1.6,
+    "下修": 1.5,
+    "利空": 1.5,
+    "爆料": 1.4,
+    "營收": 1.3,
+    "展望": 1.2,
 }
 
 STOP = False
@@ -38,6 +54,7 @@ if os.path.exists(".env"):
     load_dotenv(".env", override=True)
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+# ---------- 結構 ----------
 @dataclass
 class Token:
     polarity: str
@@ -46,11 +63,23 @@ class Token:
     weight: float
     note: str
 
+@dataclass
+class MatchResult:
+    score: float
+    hits: List[Tuple[str, float, str]]
+
+# ---------- 工具 ----------
 def get_db():
     return firestore.Client()
 
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+def first_n_sentences(text: str, n: int = 3) -> str:
+    if not text:
+        return ""
+    parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
+    return "".join(parts[:n]) + ("..." if len(parts) > n else "")
 
 def parse_docid_time(doc_id: str):
     m = re.match(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$", doc_id or "")
@@ -90,106 +119,207 @@ def compile_tokens(tokens: List[Token]):
             compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
     return compiled
 
-def score_text(text: str, pos_c, neg_c, target: str = None) -> float:
+# ---------- Scoring ----------
+def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
-    score = 0.0
+    score, hits, seen = 0.0, [], set()
     aliases = {"台積電": ["台積電", "tsmc", "2330"],
                "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
                "聯電": ["聯電", "umc", "2303"]}
     company_pattern = "|".join(re.escape(a) for a in aliases.get(target, []))
     if not re.search(company_pattern, norm):
-        return 0.0
+        return MatchResult(0.0, [])
     for ttype, cre, w, note, patt in pos_c + neg_c:
+        key = (patt, note)
+        if key in seen:
+            continue
         matched = cre.search(norm) if ttype == "regex" else patt in norm
         if matched:
             score += w
-    return score
+            hits.append((patt, w, note))
+            seen.add(key)
+    return MatchResult(score, hits)
 
+# ---------- Context-aware 調整 ----------
 def adjust_score_for_context(text: str, base_score: float) -> float:
     if not text or base_score == 0:
         return base_score
+
     norm = text.lower()
     neutral_phrases = ["重申", "符合預期", "預期內", "中性看待", "無重大影響", "持平", "未變"]
     if any(p in norm for p in neutral_phrases):
         base_score *= 0.4
+
     positive_boost = ["創新高", "倍增", "大幅成長", "獲利暴增", "報喜"]
     negative_boost = ["暴跌", "下滑", "虧損", "停工", "下修", "裁員", "警訊"]
     if any(p in norm for p in positive_boost):
         base_score *= 1.3
     if any(p in norm for p in negative_boost):
         base_score *= 1.3
+
     return base_score
 
-# ---------- 分析函式 ----------
+# ---------- Groq 分析 ----------
+def groq_analyze(news_list, target, avg_score):
+    if not news_list:
+        return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
+
+    combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
+    
+    prompt = f"""
+你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
+依情緒分數與內容趨勢，**嚴格推論明日股價方向**。
+無論結果為何，都必須明確說明「原因」。
+
+分析規則如下：
+1️⃣ 情緒分數為每則新聞的利多 / 利空加權值（括號中）。
+2️⃣ 平均後得整體情緒分數（範圍 -10 ~ +10）。
+3️⃣ 請根據以下邏輯判定方向：
+   分數 ≥ +2 → 上漲 🔼
+   +0.5 ≤ 分數 < +2 → 微漲 ↗️
+   -0.5 < 分數 < +0.5 → 不明確 ⚖️
+   -2 < 分數 ≤ -0.5 → 微跌 ↘️
+   分數 ≤ -2 → 下跌 🔽
+4️⃣ 無論趨勢為何，**務必輸出「原因」**。
+
+請用以下格式回答，所有欄位必須出現：
+明天{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
+原因：{{一句 40 字內，說明主要情緒來源}}
+情緒分數：{{整數 -10~+10}}
+
+整體平均情緒分數：{avg_score:+.2f}
+以下是新聞摘要（含分數）：
+{combined}
+"""
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "你是台股量化分析員，需根據情緒分數規則產生明確結論。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.15,
+            max_tokens=220,
+        )
+        ans = resp.choices[0].message.content.strip()
+        ans = re.sub(r"\s+", " ", ans)
+
+        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
+        trend = m_trend.group(1) if m_trend else "不明確"
+        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
+
+        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
+        reason = m_reason.group(1).strip() if m_reason and m_reason.group(1).strip() else \
+            ("多則新聞偏向利多，如營收/合作/技術突破。" if avg_score>=3 else
+             "整體氣氛略偏多，市場信心回升。" if avg_score>=1 else
+             "多則新聞利空明顯，如跌停或產能問題。" if avg_score<=-3 else
+             "多則新聞偏向利空，如獲利下滑或股價走弱。" if avg_score<=-1 else
+             "利多與利空交錯，市場短線觀望。")
+
+        m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
+        mood_score = int(m_score.group(1)) if m_score else max(-10, min(10, int(round(avg_score * 3))))
+
+        return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
+
+    except Exception as e:
+        return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
+
+# ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
     pos, neg = load_tokens(db)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     today = datetime.now(TAIWAN_TZ).date()
 
-    filtered = []
+    filtered, weighted_scores = [], []
+    seen_texts = set()
+
+    # 先把昨天和前天新聞存起來，用來去重
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
-        if not dt: continue
+        if not dt:
+            continue
         delta_days = (today - dt.date()).days
-        if delta_days > 2: continue
+        if delta_days not in (1,2):
+            continue
+        data = d.to_dict() or {}
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                continue
+            full = normalize(v.get("title","") + " " + v.get("content",""))
+            seen_texts.add(full)
+
+    # 處理三日內新聞
+    for d in db.collection(collection).stream():
+        dt = parse_docid_time(d.id)
+        if not dt:
+            continue
+        delta_days = (today - dt.date()).days
+        if delta_days > 2:
+            continue
 
         day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
         data = d.to_dict() or {}
-        for k, v in data.items():
-            if not isinstance(v, dict): continue
-            title, content = v.get("title", ""), v.get("content", "")
-            full = title + " " + content
-            score = score_text(full, pos_c, neg_c, target)
-            if score == 0: continue
-            adj_score = adjust_score_for_context(full, score)
-            filtered.append((d.id, k, title, adj_score * day_weight))
 
-    if filtered:
-        filtered.sort(key=lambda x: abs(x[3]), reverse=True)
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                continue
+            title, content = v.get("title", ""), v.get("content", "")
+            full = normalize(title + " " + content)
+
+            # 避免昨天/前天新聞今天重複出現使用舊分數
+            if delta_days != 0 and full in seen_texts:
+                continue
+
+            res = score_text(full, pos_c, neg_c, target)
+            if not res.hits:
+                continue
+
+            adj_score = adjust_score_for_context(full, res.score)
+            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
+            impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
+            total_weight = day_weight * token_weight * impact
+
+            filtered.append((d.id, k, title, res, total_weight))
+            weighted_scores.append(adj_score * total_weight)
+
+    if not filtered:
+        summary = groq_analyze([], target, 0)
+    else:
+        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
         top_news = filtered[:10]
 
-        print(f"\n📰 {target} 近期重點新聞（取用）：")
-        for docid, key, title, _ in top_news:
-            print(f"[{docid}#{key}] {title}")
+        news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
+        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
+        summary = groq_analyze(news_with_scores, target, avg_score)
 
-        avg_score = sum(s for _, _, _, s in top_news) / len(top_news)
-        if avg_score >= 2:
-            trend = "上漲 🔼"
-        elif 0 < avg_score < 2:
-            trend = "微漲 ↗️"
-        elif -2 < avg_score <= 0:
-            trend = "微跌 ↘️"
-        elif avg_score <= -2:
-            trend = "下跌 🔽"
-        else:
-            trend = "不明確 ⚖️"
+        fname = f"result_{today.strftime('%Y%m%d')}.txt"
+        with open(fname, "a", encoding="utf-8") as f:
+            f.write(f"======= {target} =======\n")
+            for docid, key, title, res, weight in top_news:
+                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
+                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
+            f.write(summary + "\n\n")
 
-        print(f"\n明日偏向：{trend}")
-        print(f"總分：{int(round(avg_score))}\n")
+    print(summary + "\n")
 
-        try:
-            db.collection(result_field).document(today.strftime("%Y%m%d")).set({
-                "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
-                "trend": trend,
-                "score": int(round(avg_score)),
-                "news_list": [{"docid": d, "key": k, "title": t} for d, k, t, _ in top_news]
-            })
-        except Exception as e:
-            print(f"[warning] Firestore 寫回失敗：{e}")
-
-    else:
-        print(f"\n📰 {target} 近期重點新聞：無可用新聞")
-        print(f"明日偏向：不明確 ⚖️")
-        print(f"總分：0\n")
+    try:
+        db.collection(result_field).document(today.strftime("%Y%m%d")).set({
+            "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
+            "result": summary,
+        })
+    except Exception as e:
+        print(f"[warning] Firestore 寫回失敗：{e}")
 
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股...\n")
+        print("🚀 開始分析台股焦點股（準確率極致版）...\n")
 
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
+    print("=" * 70)
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
+    print("=" * 70)
     analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
 
 if __name__ == "__main__":
