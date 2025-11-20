@@ -1,0 +1,16 @@
+[台積電] done. 今日 20 則新聞，已存結果。
+[鴻海] done. 今日 15 則新聞，已存結果。
+[聯電] done. 今日 18 則新聞，已存結果。
+lama-3.1-8b-instant` in organization `org_01k5eg61xwfm7btp2hdw04nek2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 21863, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}
+情緒分數：0
+
+======= 鴻海 =======
+明天股價走勢：不明確 ⚖️
+原因：Groq 呼叫失敗 Error code: 413 - {'error': {'message': 'Request too large for model `llama-3.1-8b-instant` in organization `org_01k5eg61xwfm7btp2hdw04nek2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 18560, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}
+情緒分數：0
+
+======= 聯電 =======
+明天股價走勢：不明確 ⚖️
+原因：Groq 呼叫失敗 Error code: 413 - {'error': {'message': 'Request too large for model `llama-3.1-8b-instant` in organization `org_01k5eg61xwfm7btp2hdw04nek2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 15350, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}
+情緒分數：0
+
