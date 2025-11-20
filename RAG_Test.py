@@ -164,33 +164,69 @@ def groq_analyze(news_list, target, avg_score):
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
 
-    # 每則新聞影響說明
+    # news_list 是 [(title, score), ...]
+    # 建立每則新聞的簡短描述（供 prompt 與本地摘要）
     news_details = []
     for i, (title, score) in enumerate(news_list, 1):
         impact_desc = "正面" if score > 0 else "負面"
         news_details.append(f"{i}. 「{title}」 → {impact_desc}影響 ({score:+.2f})")
     combined = "\n".join(news_details)
 
+    # 由程式端先構建一段詳細的「原因說明」草稿（會附給 model，也會用作 fallback / 增強）
+    # 分析主要利多 / 主要利空 / 含敏感詞的新聞
+    pos_news = sorted([(t, s) for t, s in news_list if s > 0], key=lambda x: x[1], reverse=True)
+    neg_news = sorted([(t, s) for t, s in news_list if s < 0], key=lambda x: x[1])
+    top_pos = pos_news[:2]
+    top_neg = neg_news[:2]
+
+    sensitive_hits = []
+    for t, s in news_list:
+        tl = t.lower()
+        for kw in SENSITIVE_WORDS.keys():
+            if kw in tl:
+                sensitive_hits.append((t, kw))
+                break
+
+    reason_lines = []
+    if top_pos:
+        rp = "; ".join([f"「{t}」({s:+.2f})" for t, s in top_pos])
+        reason_lines.append(f"主要利多：{rp}")
+    if top_neg:
+        rn = "; ".join([f"「{t}」({s:+.2f})" for t, s in top_neg])
+        reason_lines.append(f"主要利空：{rn}")
+    if sensitive_hits:
+        sh = "; ".join([f"「{t}」(含 {kw})" for t, kw in sensitive_hits])
+        reason_lines.append(f"敏感議題強化影響：{sh}")
+
+    # 補一行說明平均分數與短期影響
+    reason_lines.append(f"綜合來看平均情緒分數為 {avg_score:+.2f}，反映正負新聞交錯，但仍偏向{'多頭' if avg_score>0 else '空頭' if avg_score<0 else '中性'}。")
+
+    constructed_reason = "；".join(reason_lines)
+
     prompt = f"""
 你是一位專業台股金融分析師，請依據以下「{target}」近三日新聞摘要，
-嚴格推論明日股價方向，並給出詳細原因。
+嚴格推論明日股價方向，並給出詳細原因。請務必在「原因」段落中：
+1) 逐條評估每則新聞對股價的正/負貢獻（可採上方列出的格式），
+2) 指出主要利多與主要利空（各至多兩項），
+3) 若新聞含敏感詞（法說、財報、新品、停工等），請說明其放大效果，
+4) 最後給出一句整體總結（40字以內）。
 
-規則：
-- 每則新聞都有情緒分數，正分為利多，負分為利空。
-- 若新聞含敏感詞（法說、財報、新品、停工等），請強化其影響力。
-- 上下文詞（如「重申」、「符合預期」）會降低情緒影響。
-- 請將每則新聞對整體情緒的貢獻說明清楚。
-- 綜合所有新聞計算平均情緒分數，並推測股價走勢：
-    分數 ≥ +2 → 上漲 🔼
-    +0.5 ≤ 分數 < +2 → 微漲 ↗️
-    -0.5 < 分數 < +0.5 → 不明確 ⚖️
-    -2 < 分數 ≤ -0.5 → 微跌 ↘️
-    分數 ≤ -2 → 下跌 🔽
-
-整體平均情緒分數：{avg_score:+.2f}
-新聞摘要及分數：
+下面是程式端的預先整理（請在說明中引用或修正）：
+---- 程式端摘要開始 ----
 {combined}
+
+程式端快速判斷（供你參考，非最終結論）：
+{constructed_reason}
+---- 程式端摘要結束 ----
+
+請根據上面內容並結合你的金融常識產出以下格式（所有欄位都要出現）：
+明天{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
+原因：{{詳盡說明，包含每則新聞貢獻、主要利多/利空、敏感詞影響與簡短總結}}
+情緒分數：{{整數 -10~+10}}
+
+注意：如果你採用程式端提供的「主要利多/利空」或「敏感議題」，請在原因中明確標示你是否同意，並說明理由。
 """
+
     try:
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -198,26 +234,44 @@ def groq_analyze(news_list, target, avg_score):
                 {"role": "system", "content": "你是台股量化分析員，需根據每則新聞情緒生成明確趨勢和詳細原因。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.15,
-            max_tokens=300,
+            temperature=0.12,
+            max_tokens=400,
         )
         ans = resp.choices[0].message.content.strip()
         ans = re.sub(r"\s+", " ", ans)
 
+        # 解析 model 回傳（保留 trend / model 原因 / model 分數）
         m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
         trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
 
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        reason = m_reason.group(1).strip() if m_reason and m_reason.group(1).strip() else "綜合各新聞正負影響形成市場短線觀望。"
+        model_reason = m_reason.group(1).strip() if m_reason and m_reason.group(1).strip() else None
 
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
         mood_score = int(m_score.group(1)) if m_score else max(-10, min(10, int(round(avg_score * 3))))
 
-        return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
+        # 最終 reason：將 model 的說明與程式端的建構說明結合，讓結果更詳盡但不冗長
+        if model_reason:
+            # 若 model 原因很簡短或泛泛，優先將 constructed_reason 補上；否則合併
+            short_model = len(model_reason) < 30 or model_reason.lower().strip() in ["整體平均", "綜合各新聞正負影響形成市場短線觀望。"]
+            if short_model:
+                final_reason = constructed_reason
+            else:
+                final_reason = model_reason + "；" + constructed_reason
+        else:
+            final_reason = constructed_reason
+
+        # 最後確保 final_reason 不過長（最好控制在 ~250 字內）
+        if len(final_reason) > 600:
+            final_reason = final_reason[:590].rsplit("。", 1)[0] + "。 (摘要...)"
+
+        return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{final_reason}\n情緒分數：{mood_score:+d}"
 
     except Exception as e:
-        return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
+        # 若 model 呼叫失敗，仍回傳程式端構建的詳細原因（fallback）
+        fallback_reason = constructed_reason + "（Groq 呼叫失敗，使用程式端預先生成之分析。）"
+        return f"明天{target}股價走勢：不明確 ⚖️\n原因：{fallback_reason}\n情緒分數：{max(-10, min(10, int(round(avg_score * 3)))):+d}"
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
