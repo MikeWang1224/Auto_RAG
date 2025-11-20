@@ -1,32 +1,85 @@
-# -*- coding: utf-8 -*-
+# rag_multi_stock_pipeline.py
 """
-股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-準確率極致版（短期預測特化） - 加入 Context-aware 調整版
-✅ 嚴格依據情緒分數決策
-✅ 敏感詞加權（法說 / 財報 / 新品 / 停工等）
-✅ 支援 3 日延遲效應
-✅ Firestore 寫回 + 本地 result.txt
-✅ 新增句型判斷，避免「重申／預期內」誤判為利多
+RAG 多股票新聞分析（台積電 / 鴻海 / 聯電）
+- 適配你現有 Firestore 結構（NEWS, NEWS_Foxxcon, NEWS_UMC）
+- 對每則新聞建立 embedding 並存回 Firestore（欄位：embedding）
+- 建立向量索引（FAISS，如果不可用會用純 Python cosine fallback）
+- 對"今日"每家公司組成 RAG context（top-k 相似過去新聞 + 當日新聞摘要）
+- 組裝 Augmented Prompt 並呼叫 Groq LLM（或 fallback）產出 next-day 預測
+- 輸出結果寫回 Firestore 對應 Groq_result collection 並存本地 result_YYYYMMDD.txt
+
+使用說明:
+1) 在 .env 設定 GROQ_API_KEY、OPENAI_API_KEY（若要用 OpenAI embeddings）、EMB_PROVIDER="groq" 或 "openai"
+2) pip install -r requirements.txt
+   建議 install: google-cloud-firestore, groq, openai, numpy, faiss-cpu (可選), python-dotenv, regex
+3) 執行: python rag_multi_stock_pipeline.py
+
+注意:
+- 本檔為示範整合版；請依你環境的 credentials & API provider 微調。
 """
 
-import os, signal, regex as re
+import os
+import math
+import json
+import time
+import regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
+
 from google.cloud import firestore
 from dotenv import load_dotenv
-from groq import Groq
 
-# ---------- 設定 ----------
-SILENT_MODE = True
+# optional providers
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
+    import faiss
+except Exception:
+    faiss = None
+
+# Groq client
+try:
+    from groq import Groq
+except Exception:
+    Groq = None
+
+# OpenAI (optional embed provider)
+try:
+    import openai
+except Exception:
+    openai = None
+
+# ---------------- config ----------------
+load_dotenv()
 TAIWAN_TZ = timezone(timedelta(hours=8))
+EMB_PROVIDER = os.getenv('EMB_PROVIDER', 'groq')  # 'groq' or 'openai'
+OPENAI_EMBED_MODEL = os.getenv('OPENAI_EMBED_MODEL', 'text-embedding-3-small')
+GROQ_EMBED_MODEL = os.getenv('GROQ_EMBED_MODEL', 'nomic-embed-text')
+TOP_K = int(os.getenv('TOP_K', '5'))
+DAYS_BACK = int(os.getenv('DAYS_BACK', '7'))
 
-TOKENS_COLLECTION = "bull_tokens"
-NEWS_COLLECTION_TSMC = "NEWS"
-NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
-NEWS_COLLECTION_UMC = "NEWS_UMC"
+TOKENS_COLLECTION = os.getenv('TOKENS_COLLECTION', 'bull_tokens')
+NEWS_COLLECTION_TSMC = os.getenv('NEWS_COLLECTION_TSMC', 'NEWS')
+NEWS_COLLECTION_FOX = os.getenv('NEWS_COLLECTION_FOX', 'NEWS_Foxxcon')
+NEWS_COLLECTION_UMC = os.getenv('NEWS_COLLECTION_UMC', 'NEWS_UMC')
+RESULT_COLLECTION = os.getenv('RESULT_COLLECTION', 'Groq_result')
 
-# 敏感詞權重（短期影響放大）
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+if GROQ_API_KEY and Groq is not None:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+else:
+    groq_client = None
+
+if OPENAI_API_KEY and openai is not None:
+    openai.api_key = OPENAI_API_KEY
+
+# sensitive words (reuse)
 SENSITIVE_WORDS = {
     "法說": 1.5,
     "財報": 1.4,
@@ -42,19 +95,7 @@ SENSITIVE_WORDS = {
     "展望": 1.2,
 }
 
-STOP = False
-def _sigint_handler(signum, frame):
-    global STOP
-    STOP = True
-    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
-signal.signal(signal.SIGINT, _sigint_handler)
-
-# ---------- 初始化 ----------
-if os.path.exists(".env"):
-    load_dotenv(".env", override=True)
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-# ---------- 結構 ----------
+# ---------------- dataclasses ----------------
 @dataclass
 class Token:
     polarity: str
@@ -68,12 +109,15 @@ class MatchResult:
     score: float
     hits: List[Tuple[str, float, str]]
 
-# ---------- 工具 ----------
+# ---------------- helpers ----------------
+
 def get_db():
     return firestore.Client()
 
+
 def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
+    return re.sub(r"\s+", " ", (text or "").strip())
+
 
 def first_n_sentences(text: str, n: int = 3) -> str:
     if not text:
@@ -81,47 +125,52 @@ def first_n_sentences(text: str, n: int = 3) -> str:
     parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
     return "".join(parts[:n]) + ("..." if len(parts) > n else "")
 
+
 def parse_docid_time(doc_id: str):
     m = re.match(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$", doc_id or "")
     if not m:
         return None
-    ymd, hms = m.group("ymd"), m.group("hms") or "000000"
+    ymd, hms = m.group('ymd'), m.group('hms') or '000000'
     try:
         return datetime.strptime(ymd + hms, "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
     except:
         return None
 
-# ---------- Token ----------
+# ---------------- token loader ----------------
+
 def load_tokens(db):
     pos, neg = [], []
-    for d in db.collection(TOKENS_COLLECTION).stream():
+    col = db.collection(TOKENS_COLLECTION)
+    for d in col.stream():
         data = d.to_dict() or {}
-        pol = data.get("polarity", "").lower()
-        ttype = data.get("type", "substr").lower()
-        patt = data.get("pattern", "")
-        note = data.get("note", "")
-        w = float(data.get("weight", 1.0))
-        if pol == "positive":
+        pol = data.get('polarity', '').lower()
+        ttype = data.get('type', 'substr').lower()
+        patt = data.get('pattern', '')
+        note = data.get('note', '')
+        w = float(data.get('weight', 1.0))
+        if pol == 'positive':
             pos.append(Token(pol, ttype, patt, w, note))
-        elif pol == "negative":
+        elif pol == 'negative':
             neg.append(Token(pol, ttype, patt, -abs(w), note))
     return pos, neg
+
 
 def compile_tokens(tokens: List[Token]):
     compiled = []
     for t in tokens:
-        if t.ttype == "regex":
+        if t.ttype == 'regex':
             try:
-                compiled.append(("regex", re.compile(t.pattern, re.I), t.weight, t.note, t.pattern))
+                compiled.append(('regex', re.compile(t.pattern, re.I), t.weight, t.note, t.pattern))
             except:
                 continue
         else:
-            compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
+            compiled.append(('substr', None, t.weight, t.note, t.pattern))
     return compiled
 
-# ---------- Scoring ----------
+# ---------------- scoring (reuse) ----------------
+
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
-    norm = normalize(text)
+    norm = normalize(text).lower()
     score, hits, seen = 0.0, [], set()
     aliases = {"台積電": ["台積電", "tsmc", "2330"],
                "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
@@ -133,197 +182,252 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         key = (patt, note)
         if key in seen:
             continue
-        matched = cre.search(norm) if ttype == "regex" else patt in norm
+        matched = cre.search(norm) if ttype == 'regex' else (patt.lower() in norm)
         if matched:
             score += w
             hits.append((patt, w, note))
             seen.add(key)
     return MatchResult(score, hits)
 
-# ---------- Context-aware 調整 ----------
+
 def adjust_score_for_context(text: str, base_score: float) -> float:
-    """
-    根據句型判斷中性或強烈語氣，微調分數。
-    """
     if not text or base_score == 0:
         return base_score
-
     norm = text.lower()
-
-    # 中性、預期內、重申等弱化分數
     neutral_phrases = ["重申", "符合預期", "預期內", "中性看待", "無重大影響", "持平", "未變"]
     if any(p in norm for p in neutral_phrases):
-        base_score *= 0.4  # 降低影響力
-
-    # 強烈利多或利空詞放大分數
+        base_score *= 0.45
     positive_boost = ["創新高", "倍增", "大幅成長", "獲利暴增", "報喜"]
     negative_boost = ["暴跌", "下滑", "虧損", "停工", "下修", "裁員", "警訊"]
     if any(p in norm for p in positive_boost):
-        base_score *= 1.3
+        base_score *= 1.25
     if any(p in norm for p in negative_boost):
-        base_score *= 1.3
-
+        base_score *= 1.25
     return base_score
 
-# ---------- Groq（嚴格邏輯 + 強制理由版） ----------
-def groq_analyze(news_list, target, avg_score):
-    if not news_list:
-        return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
+# ---------------- embeddings ----------------
 
-    combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
-    
-    prompt = f"""
-你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
-依情緒分數與內容趨勢，**嚴格推論明日股價方向**。
-無論結果為何，都必須明確說明「原因」。
+def embed_texts_groq(texts: List[str]):
+    if groq_client is None:
+        raise RuntimeError('Groq client not configured')
+    resp = groq_client.embeddings.create(model=GROQ_EMBED_MODEL, input=texts)
+    return [d.embedding for d in resp.data]
 
-分析規則如下：
-1️⃣ 情緒分數為每則新聞的利多 / 利空加權值（括號中）。
-2️⃣ 平均後得整體情緒分數（範圍 -10 ~ +10）。
-3️⃣ 請根據以下邏輯判定方向：
-   分數 ≥ +2 → 上漲 🔼
-   +0.5 ≤ 分數 < +2 → 微漲 ↗️
-   -0.5 < 分數 < +0.5 → 不明確 ⚖️
-   -2 < 分數 ≤ -0.5 → 微跌 ↘️
-   分數 ≤ -2 → 下跌 🔽
-4️⃣ 無論趨勢為何，**務必輸出「原因」**。
 
-請用以下格式回答，所有欄位必須出現：
-明天{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
-原因：{{一句 40 字內，說明主要情緒來源}}
-情緒分數：{{整數 -10~+10}}
+def embed_texts_openai(texts: List[str]):
+    if openai is None:
+        raise RuntimeError('openai package not available')
+    resp = openai.Embedding.create(input=texts, model=OPENAI_EMBED_MODEL)
+    return [d['embedding'] for d in resp['data']]
 
-整體平均情緒分數：{avg_score:+.2f}
-以下是新聞摘要（含分數）：
-{combined}
-"""
+
+def embed_texts(texts: List[str]):
+    if EMB_PROVIDER == 'openai' and OPENAI_API_KEY:
+        return embed_texts_openai(texts)
+    else:
+        return embed_texts_groq(texts)
+
+# ---------------- vector utils ----------------
+
+def cosine_sim(a, b):
+    if np is None:
+        raise RuntimeError('numpy required for cosine_sim')
+    a = np.array(a, dtype=np.float32)
+    b = np.array(b, dtype=np.float32)
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+
+# ---------------- firestore helpers ----------------
+
+def collect_company_corpus(db, collection, days_back=DAYS_BACK):
+    today = datetime.now(TAIWAN_TZ).date()
+    corpus = []  # list of (docid, key, title, content, dt)
+    for d in db.collection(collection).stream():
+        dt = parse_docid_time(d.id)
+        if not dt:
+            continue
+        if (today - dt.date()).days > days_back:
+            continue
+        data = d.to_dict() or {}
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                continue
+            title = v.get('title', '')
+            content = v.get('content', '')
+            corpus.append((d.id, k, title, content, dt))
+    return corpus
+
+
+def ensure_embedding_on_firestore_item(db, collection, docid, key, text):
+    """如果該新聞沒有 embedding，計算並寫回 firestore"""
+    doc_ref = db.collection(collection).document(docid)
     try:
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+        # fetch specific field
+        doc = doc_ref.get().to_dict() or {}
+        item = doc.get(key, {})
+        if 'embedding' in item and item.get('embedding'):
+            return item.get('embedding')
+    except Exception:
+        pass
+    # compute embedding and write back
+    emb = embed_texts([text])[0]
+    # write nested field
+    try:
+        doc_ref.update({f"{key}.embedding": emb})
+    except Exception:
+        # if update fails (race), ignore
+        pass
+    return emb
+
+# ---------------- build index ----------------
+
+def build_index(embs):
+    if faiss is not None and np is not None:
+        xb = np.array(embs).astype('float32')
+        dim = xb.shape[1]
+        index = faiss.IndexFlatIP(dim)  # inner product for cosine if normalized
+        # normalize xb
+        norms = np.linalg.norm(xb, axis=1, keepdims=True) + 1e-8
+        xb_norm = xb / norms
+        index.add(xb_norm)
+        return index
+    else:
+        return None
+
+# ---------------- retrieval ----------------
+
+def retrieve_most_similar(query_text: str, corpus, corpus_embs, k=TOP_K):
+    """Return list of indices into corpus for top-k similar items"""
+    if not corpus:
+        return []
+    q_emb = embed_texts([query_text])[0]
+    if faiss is not None and np is not None and corpus_embs is not None:
+        # normalize q
+        qv = np.array(q_emb).astype('float32')
+        qv = qv / (np.linalg.norm(qv) + 1e-8)
+        D, I = build_index(corpus_embs).search(qv.reshape(1, -1), k)
+        idxs = [int(i) for i in I[0] if i != -1]
+        return idxs
+    else:
+        # fallback: compute cosine with numpy
+        scores = []
+        for i, emb in enumerate(corpus_embs):
+            sim = cosine_sim(q_emb, emb)
+            scores.append((sim, i))
+        scores.sort(reverse=True)
+        return [i for _, i in scores[:k]]
+
+# ---------------- RAG prompt assembly ----------------
+
+def make_augmented_prompt(target: str, today_items: List[Tuple], retrieved: List[Tuple]):
+    """Construct a RAG-style prompt combining today's headlines and retrieved similar past news."""
+    header = f"你是一位專業的台股量化分析師，請根據下列資料並嚴格推論明日{target}股價方向，並給出一句 30 字內原因與情緒分數。\n\n"
+    today_section = "【今日新聞（摘要）】\n"
+    for docid, key, title, content, dt in today_items:
+        today_section += f"- {first_n_sentences(title,2)} {first_n_sentences(content,2)}\n"
+
+    past_section = "\n【過去相似新聞（供參考）】\n"
+    for docid, key, title, content, dt in retrieved:
+        past_section += f"- ({docid}) {first_n_sentences(title,2)} {first_n_sentences(content,2)}\n"
+
+    instr = ("\n請基於上面資料做判斷。輸出格式：\n明天{target}股價走勢：{上漲/微漲/微跌/下跌/不明確}（附符號）\n原因：一句 30 字內\n情緒分數：整數 -10~+10\n")
+    return header + today_section + past_section + instr
+
+# ---------------- Groq call ----------------
+
+def call_groq_for_analysis(prompt: str):
+    if groq_client is None:
+        # fallback: simple rule-based summary
+        return f"明天股價走勢：不明確 ⚖️\n原因：Groq 未配置\n情緒分數：0"
+    try:
+        resp = groq_client.chat.completions.create(
+            model='llama-3.1-8b-instant',
             messages=[
                 {"role": "system", "content": "你是台股量化分析員，需根據情緒分數規則產生明確結論。"},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.15,
-            max_tokens=220,
+            max_tokens=300,
         )
-        ans = resp.choices[0].message.content.strip()
-        ans = re.sub(r"\s+", " ", ans)
-
-        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
-        trend = m_trend.group(1) if m_trend else "不明確"
-        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
-
-        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        if m_reason and m_reason.group(1).strip():
-            reason = m_reason.group(1).strip()
-        else:
-            if avg_score >= 3:
-                reason = "多則新聞偏向利多，如營收/合作/技術突破。"
-            elif avg_score >= 1:
-                reason = "整體氣氛略偏多，市場信心回升。"
-            elif avg_score <= -3:
-                reason = "多則新聞利空明顯，如跌停或產能問題。"
-            elif avg_score <= -1:
-                reason = "多則新聞偏向利空，如獲利下滑或股價走弱。"
-            else:
-                reason = "利多與利空交錯，市場短線觀望。"
-
-        m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
-        if m_score:
-            mood_score = int(m_score.group(1))
-        else:
-            mood_score = max(-10, min(10, int(round(avg_score * 3))))
-
-        return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
-
+        text = resp.choices[0].message.content.strip()
+        return text
     except Exception as e:
-        return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
+        return f"明天股價走勢：不明確 ⚖️\n原因：Groq 呼叫失敗 {e}\n情緒分數：0"
 
-# ---------- 主分析 ----------
-def analyze_target(db, collection, target, result_field):
+# ---------------- main RAG flow per company ----------------
+
+def analyze_company_with_rag(db, collection, target, result_collection):
     pos, neg = load_tokens(db)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
+
+    # collect corpus (近 DAYS_BACK 日)
+    corpus = collect_company_corpus(db, collection, days_back=DAYS_BACK)
+    if not corpus:
+        print(f"{target}：近 {DAYS_BACK} 日無新聞")
+        return
+
+    # ensure embeddings exist for corpus items and for today's items
+    corpus_texts = [t[2] + "\n" + t[3] for t in corpus]
+    corpus_embs = []
+    for (docid, key, title, content, dt), text in zip(corpus, corpus_texts):
+        emb = None
+        try:
+            # try to read stored embedding
+            doc = db.collection(collection).document(docid).get().to_dict() or {}
+            item = doc.get(key, {})
+            emb = item.get('embedding')
+        except Exception:
+            emb = None
+        if not emb:
+            emb = ensure_embedding_on_firestore_item(db, collection, docid, key, title + '\n' + content)
+        corpus_embs.append(emb)
+
+    # prepare today's items (only those with docid == today)
     today = datetime.now(TAIWAN_TZ).date()
+    today_items = [item for item in corpus if item[4].date() == today]
 
-    filtered, weighted_scores = [], []
-    for d in db.collection(collection).stream():
-        dt = parse_docid_time(d.id)
-        if not dt:
-            continue
-        delta_days = (today - dt.date()).days
-        if delta_days > 2:
-            continue
+    # Form a canonical query (could be today's headlines concatenated)
+    query_text = f"{target} 今日新聞 會如何影響明日股價？摘要："
+    for docid, key, title, content, dt in today_items:
+        query_text += first_n_sentences(title, 2) + " ; "
 
-        day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
-        data = d.to_dict() or {}
+    # retrieve top-k similar past news from corpus (excluding pure todays)
+    retrieved_idxs = retrieve_most_similar(query_text, corpus, corpus_embs, k=TOP_K)
+    retrieved = [corpus[i] for i in retrieved_idxs if corpus[i] not in today_items]
 
-        for k, v in data.items():
-            if not isinstance(v, dict):
-                continue
-            title, content = v.get("title", ""), v.get("content", "")
-            full = title + " " + content
-            res = score_text(full, pos_c, neg_c, target)
-            if not res.hits:
-                continue
+    # assemble RAG prompt
+    prompt = make_augmented_prompt(target, today_items, retrieved)
 
-            # 🔧 新增：根據句型調整分數
-            adj_score = adjust_score_for_context(full, res.score)
+    # call Groq LLM to analyze
+    analysis = call_groq_for_analysis(prompt)
 
-            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
-            impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
-            total_weight = day_weight * token_weight * impact
-
-            filtered.append((d.id, k, title, res, total_weight))
-            weighted_scores.append(adj_score * total_weight)  # 使用調整後分數
-
-    if not filtered:
-        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
-        summary = groq_analyze([], target, 0)
-    else:
-        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
-        top_news = filtered[:10]
-
-        print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
-        for docid, key, title, res, weight in top_news:
-            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
-            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title}")
-            for p, w, n in res.hits:
-                print(f"   {'+' if w>0 else '-'} {p}（{n}）")
-
-        news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
-        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
-        summary = groq_analyze(news_with_scores, target, avg_score)
-
-        fname = f"result_{today.strftime('%Y%m%d')}.txt"
-        with open(fname, "a", encoding="utf-8") as f:
-            f.write(f"======= {target} =======\n")
-            for docid, key, title, res, weight in top_news:
-                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
-                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
-            f.write(summary + "\n\n")
-
-    print(summary + "\n")
-
+    # write back result to firestore
+    result_doc = {
+        'timestamp': datetime.now(TAIWAN_TZ).isoformat(),
+        'result': analysis,
+        'query': query_text,
+        'retrieved_count': len(retrieved)
+    }
     try:
-        db.collection(result_field).document(today.strftime("%Y%m%d")).set({
-            "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
-            "result": summary,
-        })
+        db.collection(result_collection).document(datetime.now(TAIWAN_TZ).strftime('%Y%m%d')).set(result_doc)
     except Exception as e:
-        print(f"[warning] Firestore 寫回失敗：{e}")
+        print('[warning] Firestore 寫回失敗：', e)
 
-# ---------- 主程式 ----------
+    # append to local file
+    fname = f"result_{datetime.now(TAIWAN_TZ).strftime('%Y%m%d')}.txt"
+    with open(fname, 'a', encoding='utf-8') as f:
+        f.write(f"======= {target} =======\n")
+        f.write(analysis + '\n\n')
+    print(f"[{target}] done. Retrieved {len(retrieved)} items. Result saved.")
+
+# ---------------- entrypoint ----------------
+
 def main():
-    if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（準確率極致版）...\n")
-
     db = get_db()
-    analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
-    print("=" * 70)
-    analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
-    print("=" * 70)
-    analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
+    analyze_company_with_rag(db, NEWS_COLLECTION_TSMC, '台積電', RESULT_COLLECTION)
+    analyze_company_with_rag(db, NEWS_COLLECTION_FOX, '鴻海', RESULT_COLLECTION + '_Foxxcon')
+    analyze_company_with_rag(db, NEWS_COLLECTION_UMC, '聯電', RESULT_COLLECTION + '_UMC')
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
