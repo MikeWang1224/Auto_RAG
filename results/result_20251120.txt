@@ -1,16 +1,14 @@
-[台積電] done. 今日 20 則新聞，已存結果。
-[鴻海] done. 今日 15 則新聞，已存結果。
-[聯電] done. 今日 18 則新聞，已存結果。
-lama-3.1-8b-instant` in organization `org_01k5eg61xwfm7btp2hdw04nek2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 21863, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}
-情緒分數：0
+明天台積電股價走勢：上漲 🔼
+原因：是台積電與輝達之間的競爭和合作關係正在加強，記憶體的漲價對台積電的獲
+今日股價漲跌：+60.00 (+4.30%)
 
-======= 鴻海 =======
-明天股價走勢：不明確 ⚖️
-原因：Groq 呼叫失敗 Error code: 413 - {'error': {'message': 'Request too large for model `llama-3.1-8b-instant` in organization `org_01k5eg61xwfm7btp2hdw04nek2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 18560, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}
-情緒分數：0
+======================================================================
+明天鴻海股價走勢：上漲 🔼
+原因：鴻海近期有多項正面新聞，包括與三菱Fuso合資設新公司生產電動巴士、打造AI刷手機器人、國家隊豪砸近400億元狂撐大盤等。這些新聞都表明鴻海正在積極推動新技術和業務發展，增加了投資者的信心。
+今日股價漲跌：+7.50 (+3.28%)
 
-======= 聯電 =======
-明天股價走勢：不明確 ⚖️
-原因：Groq 呼叫失敗 Error code: 413 - {'error': {'message': 'Request too large for model `llama-3.1-8b-instant` in organization `org_01k5eg61xwfm7btp2hdw04nek2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 15350, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}
-情緒分數：0
+======================================================================
+明天聯電股價走勢：上漲 🔼
+原因：聯電與Metalenz合作的新聞表明聯電正在積極推動新技術的發展
+今日股價漲跌：+0.30 (+0.68%)
 
