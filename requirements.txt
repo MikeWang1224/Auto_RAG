@@ -5,14 +5,3 @@ numpy==2.2.0
 python-dotenv==1.1.1
 regex==2024.11.6
 rich==14.1.0
-
-# 🔥 Firebase（你缺這個）
-firebase-admin==6.4.0
-
-# 🔥 RAG 需要的模型
-sentence-transformers==2.6.0
-
-# 🔥 sentence-transformers 必要：PyTorch CPU版
-torch==2.2.0
-torchvision==0.17.0
-torchaudio==2.2.0
