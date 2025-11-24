@@ -1,22 +1,21 @@
-#1121
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
 準確率極致版（短期預測特化） - Context-aware + 去重新聞版
-✅ 嚴格依據情緒分數決策
-✅ 敏感詞加權（法說 / 財報 / 新品 / 停工等）
+✅ 嚴格依據情緒分數決策（硬規則量化版）
+✅ 敏感詞加權（單次加成）
 ✅ 支援 3 日延遲效應
 ✅ Firestore 寫回 + 本地 result.txt
 ✅ 新增句型判斷，避免「重申／預期內」誤判
 ✅ 相同新聞內容去重
 """
-
 import os, signal, regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
 from google.cloud import firestore
 from dotenv import load_dotenv
+# 留著 Groq client 以防日後需要，但本版本不呼叫模型
 from groq import Groq
 
 # ---------- 設定 ----------
@@ -28,6 +27,7 @@ NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
 
+# 內部敏感詞表（舊版保留，主加權規則另設）
 SENSITIVE_WORDS = {
     "法說": 1.5,
     "財報": 1.4,
@@ -43,6 +43,24 @@ SENSITIVE_WORDS = {
     "展望": 1.2,
 }
 
+# 硬規則加權（單次加成清單，照你要求的 mapping）
+HARD_WEIGHTS_POS = {
+    "財報": 1.5,
+    "法說": 1.5,
+    "展望": 1.5,
+    "資本支出": 1.5,
+    "訂單": 1.2,
+    "擴產": 1.2,
+    "爆單": 1.2,
+    "漲價": 1.2,
+}
+HARD_WEIGHTS_NEG = {
+    "停工": -1.5,
+    "裁員": -1.5,
+    "虧損": -1.5,
+    "下修": -1.5,
+}
+
 STOP = False
 def _sigint_handler(signum, frame):
     global STOP
@@ -53,6 +71,7 @@ signal.signal(signal.SIGINT, _sigint_handler)
 # ---------- 初始化 ----------
 if os.path.exists(".env"):
     load_dotenv(".env", override=True)
+# 建立 client（目前不呼叫）
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # ---------- 結構 ----------
@@ -178,129 +197,115 @@ def adjust_score_for_context(text: str, base_score: float) -> float:
 
     return base_score
 
-# ---------- 修改：Groq 判斷（加入 today_change） ----------
-def groq_analyze(news_list, target, avg_score, today_change):
+# ---------- 新：硬規則決策函式（替代 LLM） ----------
+def decide_by_hard_rules(news_list: List[Tuple[str, float]], today_change: float, full_texts: List[str] = None) -> str:
     """
-    news_list: [(title, score), ...]
-    avg_score: 平均情緒分數
-    today_change: 今日實際漲跌幅 (float) 例如 +0.0328
+    news_list: [(title, score_weighted), ...]
+    today_change: 當日漲跌（float）
+    full_texts: 對應每則新聞的完整文字（可選，用來檢查是否包含指定關鍵詞）
+    返回：格式化的分析字串（與原本 groq_analyze 相容）
+    規則：
+      - 每則新聞 base: 正面 +1.0 / 負面 -1.0 / 0 為中性
+      - 若新聞含硬權重關鍵詞，單次加成（正向或負向）
+      - 最終標準化分數 = sum(each_contribution) / (N + 1)
+      - impact 分類閾值：
+          >= 2.5 -> impact 1（強烈利多）
+          1.0 <= score < 2.5 -> impact 2（偏多）
+          -1.0 < score < 1.0 -> impact 3（盤整偏空）
+          <= -1.0 -> impact 4（強烈利空）
     """
-    if not news_list:
-        return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
+    n = len(news_list)
+    if n == 0:
+        return "明天股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
 
-    # 格式化新聞清單
-    news_details = []
-    for i, (title, score) in enumerate(news_list, 1):
-        impact_desc = "正面" if score > 0 else "負面"
-        news_details.append(f"{i}. 「{title}」 → {impact_desc}影響 ({score:+.2f})")
-    combined = "\n".join(news_details)
+    contributions = []
+    reason_lines = []
+    for idx, (title, weighted_score) in enumerate(news_list):
+        # base polarity from weighted_score sign
+        base = 1.0 if weighted_score > 0 else (-1.0 if weighted_score < 0 else 0.0)
+        add = 0.0
+        txt = (full_texts[idx] if full_texts and idx < len(full_texts) else title).lower()
 
-    # 程式端建構原因
-    pos_news = sorted([(t, s) for t, s in news_list if s > 0], key=lambda x: x[1], reverse=True)
-    neg_news = sorted([(t, s) for t, s in news_list if s < 0], key=lambda x: x[1])
-    top_pos = pos_news[:2]
-    top_neg = neg_news[:2]
-
-    sensitive_hits = []
-    for t, s in news_list:
-        tl = t.lower()
-        for kw in SENSITIVE_WORDS.keys():
-            if kw in tl:
-                sensitive_hits.append((t, kw))
+        # 單次正權重檢查
+        for kw, v in HARD_WEIGHTS_POS.items():
+            if kw in txt:
+                add += v
+                reason_lines.append(f"新聞[{idx+1}] 包含正向關鍵詞「{kw}」，加成 {v:+.2f}")
+                break  # 單次加成
+        # 單次負權重檢查（優先負面）
+        for kw, v in HARD_WEIGHTS_NEG.items():
+            if kw in txt:
+                add += v  # v 已經是負數
+                reason_lines.append(f"新聞[{idx+1}] 包含負向關鍵詞「{kw}」，加成 {v:+.2f}")
                 break
 
-    reason_lines = []
-    if top_pos:
-        rp = "; ".join([f"「{t}」({s:+.2f})" for t, s in top_pos])
-        reason_lines.append(f"主要利多：{rp}")
-    if top_neg:
-        rn = "; ".join([f"「{t}」({s:+.2f})" for t, s in top_neg])
-        reason_lines.append(f"主要利空：{rn}")
-    if sensitive_hits:
-        sh = "; ".join([f"「{t}」(含 {kw})" for t, kw in sensitive_hits])
-        reason_lines.append(f"敏感議題強化影響：{sh}")
+        contrib = base + add
+        contributions.append(contrib)
+        reason_lines.append(f"新聞[{idx+1}]：標題/內容摘要「{first_n_sentences(title,1)}」，基礎貢獻 {base:+.2f}，加權後 {contrib:+.2f}")
 
-    reason_lines.append(f"綜合來看平均情緒分數為 {avg_score:+.2f}，反映正負新聞交錯，但仍偏向{'多頭' if avg_score>0 else '空頭' if avg_score<0 else '中性'}。")
+    total_score = sum(contributions)
+    standardized = total_score / (n + 1)  # 按你指定的標準化公式
 
-    # 今日漲跌字串
+    # impact 分類
+    if standardized >= 2.5:
+        impact = 1
+        trend = "上漲"
+        symbol = "🔼"
+    elif standardized >= 1.0:
+        impact = 2
+        trend = "微漲"
+        symbol = "↗️"
+    elif standardized > -1.0:
+        impact = 3
+        trend = "微跌"
+        symbol = "↘️"
+    else:
+        impact = 4
+        trend = "下跌"
+        symbol = "🔽"
+
+    # 今日走勢與新聞方向關聯
     pct = round(today_change * 100, 2)
     trend_today = "上漲" if today_change > 0 else "下跌" if today_change < 0 else "平盤"
-    reason_lines.append(f"今日市場真實走勢：{trend_today}（{pct}%），作為市場即時反應指標。")
-
-    constructed_reason = "；".join(reason_lines)
-
-    # 構造 prompt，明確要求模型比較新聞與今日市場反應
-    prompt = f"""
-你是一位專業台股金融分析師，請依據以下「{target}」近三日新聞摘要與今日市場走勢，
-嚴格推論明日股價方向，並給出詳細原因。請務必在「原因」段落中：
-1) 逐條評估每則新聞對股價的正/負貢獻（可採上方列出的格式），
-2) 指出主要利多與主要利空（各至多兩項），
-3) 若新聞含敏感詞（法說、財報、新品、停工等），請說明其放大效果，
-4) 評估今日市場走勢（已提供）是否「強化」或「抵銷」新聞發出的訊號，
-5) 最後給出一句整體總結（40字以內）。
-
-下面是程式端的預先整理（請在說明中引用或修正）：
----- 程式端摘要開始 ----
-{combined}
-
-程式端快速判斷（供你參考，非最終結論）：
-{constructed_reason}
----- 程式端摘要結束 ----
-
-【今日市場即時走勢（程式提供）】
-- 今日股價：{trend_today}（{pct}%）
-
-請根據上面內容並結合你的金融常識產出以下格式（所有欄位都要出現）：
-明天{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
-原因：{{詳盡說明，包含每則新聞貢獻、主要利多/利空、敏感詞影響、今日走勢如何影響明日判斷與簡短總結}}
-情緒分數：{{整數 -10~+10}}
-
-注意：如果你採用程式端提供的「主要利多/利空」或「敏感議題」，請在原因中明確標示你是否同意，並說明理由。
-"""
-
-    try:
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "你是台股量化分析員，需根據新聞情緒與當日盤勢生成明確趨勢和詳細原因。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.12,
-            max_tokens=450,
-        )
-        ans = resp.choices[0].message.content.strip()
-        ans = re.sub(r"\s+", " ", ans)
-
-        # 解析 model 回傳（保留 trend / model 原因 / model 分數）
-        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
-        trend = m_trend.group(1) if m_trend else "不明確"
-        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
-
-        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        model_reason = m_reason.group(1).strip() if m_reason and m_reason.group(1).strip() else None
-
-        m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
-        mood_score = int(m_score.group(1)) if m_score else max(-10, min(10, int(round(avg_score * 3))))
-
-        # 組合最終 reason
-        if model_reason:
-            short_model = len(model_reason) < 30 or model_reason.lower().strip() in ["整體平均", "綜合各新聞正負影響形成市場短線觀望。"]
-            if short_model:
-                final_reason = constructed_reason
-            else:
-                final_reason = model_reason + "；" + constructed_reason
+    # 判斷是否強化或抵銷（簡單判斷：標準化分數方向與今日走勢方向）
+    dir_sign = 1 if standardized > 0 else (-1 if standardized < 0 else 0)
+    today_sign = 1 if today_change > 0 else (-1 if today_change < 0 else 0)
+    if dir_sign != 0 and today_sign != 0:
+        if dir_sign == today_sign:
+            market_effect = "今日走勢與新聞方向同向，市場走勢強化新聞信號。"
         else:
-            final_reason = constructed_reason
+            market_effect = "今日走勢與新聞方向相反，市場走勢可能已提前消化或抵銷新聞影響。"
+    else:
+        market_effect = "今日走勢或新聞方向中性，無明顯強化/抵銷判斷。"
 
-        if len(final_reason) > 600:
-            final_reason = final_reason[:590].rsplit("。", 1)[0] + "。 (摘要...)"
+    # 情緒分數映射（-10~+10），利用 standardized * 3（並 clamp）
+    mood_score = max(-10, min(10, int(round(standardized * 3))))
 
-        return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{final_reason}\n情緒分數：{mood_score:+d}"
+    # 構造最終原因（限制長度但保留細項）
+    detail_reason = "\n".join(reason_lines)
+    summary_reason = f"標準化分數 {standardized:+.2f}；{market_effect} (今日漲跌 {trend_today} {pct}%)"
 
-    except Exception as e:
-        # fallback
-        fallback_reason = constructed_reason + "（Groq 呼叫失敗，使用程式端預先生成之分析。）"
-        return f"明天{target}股價走勢：不明確 ⚖️\n原因：{fallback_reason}\n情緒分數：{max(-10, min(10, int(round(avg_score * 3)))):+d}"
+    final_text = (
+        f"明天股價走勢：{trend} {symbol}\n"
+        f"原因：{summary_reason}\n"
+        f"細節：\n{detail_reason}\n"
+        f"情緒分數：{mood_score:+d}"
+    )
+    return final_text
+
+# ---------- 修改：Groq 判斷（已改為硬規則） ----------
+def groq_analyze(news_list, target, avg_score, today_change):
+    """
+    新版本：使用硬規則（decide_by_hard_rules）替代 LLM。
+    news_list: [(title, score), ...]（程式端已乘上權重）
+    avg_score: 平均情緒分數（保留傳入以便未來使用）
+    today_change: 今日實際漲跌幅 (float)
+    """
+    # news_list 內的 title 已提供，我們也嘗試把 title 當做 full_texts 送入判斷函式
+    full_texts = [t for t, _ in news_list]
+    result = decide_by_hard_rules(news_list, today_change, full_texts)
+    # 在結果前加上 target 方便辨識
+    return result.replace("明天股價走勢", f"明天{target}股價走勢", 1)
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
@@ -372,28 +377,38 @@ def analyze_target(db, collection, target, result_field):
             if news_text in seen_text:
                 continue
             seen_text.add(news_text)
-            top_news.append((docid, key, title, res, weight))
+            top_news.append((docid, key, title, res, weight, full))
             if len(top_news) >= 10:
                 break
 
         # 輸出新聞摘要（console）
         print(f"\n📰 {target} 近期重點新聞（含衝擊）:")
-        for docid, key, title, res, weight in top_news:
+        for docid, key, title, res, weight, full in top_news:
             impact_val = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
             print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact_val/10:.2f}) {title}")
             for p, w, n in res.hits:
                 sign = "+" if w>0 else "-"
                 print(f"   {sign} {p}（{n}）")
 
-        news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
+        # 構造 news_with_scores 供硬規則使用（保留 title 及加權後分數）
+        news_with_scores = []
+        full_texts = []
+        for _, _, title, res, weight, full in top_news:
+            news_with_scores.append((title, res.score * weight))
+            full_texts.append(full)
+
+        # 計算 avg_score（保留）
         avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
+
+        # 使用硬規則決策替代原本的 LLM 呼叫
+        # groq_analyze 內會呼叫 decide_by_hard_rules
         summary = groq_analyze(news_with_scores, target, avg_score, today_price_change)
 
         # 本地存檔
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
             f.write(f"======= {target} =======\n")
-            for docid, key, title, res, weight in top_news:
+            for docid, key, title, res, weight, full in top_news:
                 hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
                 f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
             f.write(summary + "\n\n")
@@ -412,7 +427,7 @@ def analyze_target(db, collection, target, result_field):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（準確率極致版）...\n")
+        print("🚀 開始分析台股焦點股（準確率極致版 - 硬規則）...\n")
 
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
