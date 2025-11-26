@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-== 保留原判斷邏輯，不改準確率 ==
-唯一變更：輸出格式改成單行精簡字串
 """
 import os, signal, regex as re
 from dataclasses import dataclass
@@ -66,12 +64,8 @@ signal.signal(signal.SIGINT, _sigint_handler)
 # ---------- 初始化 ----------
 if os.path.exists(".env"):
     load_dotenv(".env", override=True)
-# 延後建立 Groq client（若需要再呼叫 get_groq_client）
-def get_groq_client():
-    key = os.getenv("GROQ_API_KEY")
-    if not key:
-        return None
-    return Groq(api_key=key)
+# 建立 client（目前不呼叫）
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # ---------- 結構 ----------
 @dataclass
@@ -110,7 +104,7 @@ def parse_docid_time(doc_id: str):
     except:
         return None
 
-# ---------- 解析 price_change ----------
+# ---------- 新增：解析 price_change ----------
 def parse_price_change(raw: str) -> float:
     """
     解析格式範例：
@@ -120,8 +114,7 @@ def parse_price_change(raw: str) -> float:
     """
     if not raw:
         return 0.0
-    s = str(raw).replace(",", "").strip()
-    m = re.search(r"\(([-+]?[\d\.]+)%\)", s) or re.search(r"([-+]?[\d\.]+)%", s)
+    m = re.search(r"\(([-+]?[\d\.]+)%\)", raw)
     if not m:
         return 0.0
     try:
@@ -132,24 +125,17 @@ def parse_price_change(raw: str) -> float:
 # ---------- Token ----------
 def load_tokens(db):
     pos, neg = [], []
-    try:
-        for d in db.collection(TOKENS_COLLECTION).stream():
-            data = d.to_dict() or {}
-            pol = data.get("polarity", "").lower()
-            ttype = data.get("type", "substr").lower()
-            patt = data.get("pattern", "")
-            note = data.get("note", "")
-            try:
-                w = float(data.get("weight", 1.0))
-            except:
-                w = 1.0
-            if pol == "positive":
-                pos.append(Token(pol, ttype, patt, w, note))
-            elif pol == "negative":
-                neg.append(Token(pol, ttype, patt, -abs(w), note))
-    except Exception as e:
-        # 若 tokens collection 不存在或讀取失敗，回傳空列表（程式仍可運行）
-        print(f"[warning] load_tokens 失敗：{e}")
+    for d in db.collection(TOKENS_COLLECTION).stream():
+        data = d.to_dict() or {}
+        pol = data.get("polarity", "").lower()
+        ttype = data.get("type", "substr").lower()
+        patt = data.get("pattern", "")
+        note = data.get("note", "")
+        w = float(data.get("weight", 1.0))
+        if pol == "positive":
+            pos.append(Token(pol, ttype, patt, w, note))
+        elif pol == "negative":
+            neg.append(Token(pol, ttype, patt, -abs(w), note))
     return pos, neg
 
 def compile_tokens(tokens: List[Token]):
@@ -171,17 +157,14 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     aliases = {"台積電": ["台積電", "tsmc", "2330"],
                "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
                "聯電": ["聯電", "umc", "2303"]}
-    if target not in aliases:
-        return MatchResult(0.0, [])
-    company_pattern = r"\b(?:" + "|".join(re.escape(a) for a in aliases.get(target, [])) + r")\b"
+    company_pattern = "|".join(re.escape(a) for a in aliases.get(target, []))
     if not re.search(company_pattern, norm):
         return MatchResult(0.0, [])
-
     for ttype, cre, w, note, patt in pos_c + neg_c:
         key = (patt, note)
         if key in seen:
             continue
-        matched = cre.search(norm) if ttype == "regex" else (patt in norm)
+        matched = cre.search(norm) if ttype == "regex" else patt in norm
         if matched:
             score += w
             hits.append((patt, w, note))
@@ -207,11 +190,11 @@ def adjust_score_for_context(text: str, base_score: float) -> float:
 
     return base_score
 
-# ---------- 市場調整與背離偵測 ----------
+# ---------- 新：市場調整與背離偵測 ----------
 def adjust_by_market(avg_score: float, today_change: float) -> float:
     """
     根據今日漲跌幅調整平均分數。
-    保守預設：
+    參數與數值皆可調整，這是保守預設：
       - 當日大漲 (>= 3%)：+0.5
       - 當日中度漲跌 (|1%~3%|)：+/-0.2
       - 當日大跌 (<= -3%)：-0.5
@@ -228,9 +211,10 @@ def adjust_by_market(avg_score: float, today_change: float) -> float:
 
 def detect_divergence(avg_score: float, today_change: float) -> str:
     """
-    背離檢查：
-      - avg_score > 1 且 today_change < -2% -> 利多不漲
-      - avg_score < -1 且 today_change > +2% -> 利空不跌
+    根據 avg_score 與今日漲跌檢查是否背離：
+      - avg_score > 1 且 today_change < -2% -> 利多不漲（可能主力出貨）
+      - avg_score < -1 且 today_change > +2% -> 利空不跌（可能隱性利多）
+      - 否則無明顯背離
     """
     if avg_score > 1.0 and today_change < -0.02:
         return "利多不漲（疑似主力出貨）"
@@ -238,23 +222,33 @@ def detect_divergence(avg_score: float, today_change: float) -> str:
         return "利空不跌（可能有隱性利多）"
     return "無明顯背離"
 
-# ---------- 硬規則決策函式（替代 LLM） ----------
-def decide_by_hard_rules(news_list: List[Tuple[str, float]], today_change: float, full_texts: List[str] = None, adjusted_avg: float = None, divergence: str = None) -> Tuple[str,int,List[str]]:
+# ---------- 新：硬規則決策函式（替代 LLM） ----------
+def decide_by_hard_rules(news_list: List[Tuple[str, float]], today_change: float, full_texts: List[str] = None, adjusted_avg: float = None, divergence: str = None) -> str:
     """
-    返回：
-      - concise_str: 單行輸出（使用者要求格式）
-      - mood_score_int: 情緒分數整數（-10..+10）
-      - top_phrases: 用於原因欄的關鍵短語清單
-    保留原始決策邏輯但改造輸出格式。
+    news_list: [(title, score_weighted), ...]
+    today_change: 當日漲跌（float）
+    full_texts: 對應每則新聞的完整文字（可選，用來檢查是否包含指定關鍵詞）
+    adjusted_avg: 經市場調整後的平均分數（可選）
+    divergence: 背離偵測字串（可選）
+    返回：格式化的分析字串（與原本 groq_analyze 相容）
+    規則：
+      - 每則新聞 base: 正面 +1.0 / 負面 -1.0 / 0 為中性
+      - 若新聞含硬權重關鍵詞，單次加成（正向或負向）
+      - 最終標準化分數 = sum(each_contribution) / (N + 1)
+      - impact 分類閾值：
+          >= 2.5 -> impact 1（強烈利多）
+          1.0 <= score < 2.5 -> impact 2（偏多）
+          -1.0 < score < 1.0 -> impact 3（盤整偏空）
+          <= -1.0 -> impact 4（強烈利空）
     """
     n = len(news_list)
     if n == 0:
-        concise = "明天股價走勢：不明確 ⚖️ 原因：近三日無相關新聞。 情緒分數：0"
-        return concise, 0, ["無新聞資料"]
+        return "明天股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
 
     contributions = []
     reason_lines = []
     for idx, (title, weighted_score) in enumerate(news_list):
+        # base polarity from weighted_score sign
         base = 1.0 if weighted_score > 0 else (-1.0 if weighted_score < 0 else 0.0)
         add = 0.0
         txt = (full_texts[idx] if full_texts and idx < len(full_texts) else title).lower()
@@ -263,99 +257,95 @@ def decide_by_hard_rules(news_list: List[Tuple[str, float]], today_change: float
         for kw, v in HARD_WEIGHTS_POS.items():
             if kw in txt:
                 add += v
-                reason_lines.append(f"包含正向關鍵詞「{kw}」")
-                break
+                reason_lines.append(f"新聞[{idx+1}] 包含正向關鍵詞「{kw}」，加成 {v:+.2f}")
+                break  # 單次加成
         # 單次負權重檢查（優先負面）
         for kw, v in HARD_WEIGHTS_NEG.items():
             if kw in txt:
-                add += v
-                reason_lines.append(f"包含負向關鍵詞「{kw}」")
+                add += v  # v 已經是負數
+                reason_lines.append(f"新聞[{idx+1}] 包含負向關鍵詞「{kw}」，加成 {v:+.2f}")
                 break
 
         contrib = base + add
         contributions.append(contrib)
-        # 簡短摘要一句
-        sent = first_n_sentences(title, 1)
-        reason_lines.append(f"新聞[{idx+1}]摘要：{sent}")
+        reason_lines.append(f"新聞[{idx+1}]：標題/內容摘要「{first_n_sentences(title,1)}」，基礎貢獻 {base:+.2f}，加權後 {contrib:+.2f}")
 
     total_score = sum(contributions)
-    standardized = total_score / (n + 1)  # 舊標準化公式
+    standardized = total_score / (n + 1)  # 按你指定的標準化公式
 
-    # 若有市場調整，採用 adjusted_avg（保持原程式設計）
+    # 如果有 adjusted_avg（市場調整結果），使用並在 reason 中註明
     if adjusted_avg is not None:
-        standardized = adjusted_avg
-        reason_lines.append(f"已套用市場漲跌幅調整")
+        standardized = adjusted_avg  # 以市場調整後的分數為主（你也可以改成加權平均）
+        reason_lines.append(f"（已套用市場漲跌幅調整，使用調整後分數 {standardized:+.2f}）")
 
-    # impact 分類（決定方向）
+    # impact 分類
     if standardized >= 2.5:
+        impact = 1
         trend = "上漲"
         symbol = "🔼"
     elif standardized >= 1.0:
+        impact = 2
         trend = "微漲"
         symbol = "↗️"
     elif standardized > -1.0:
+        impact = 3
         trend = "微跌"
         symbol = "↘️"
     else:
+        impact = 4
         trend = "下跌"
         symbol = "🔽"
 
-    # 今日走勢
+    # 今日走勢與新聞方向關聯
     pct = round(today_change * 100, 2)
     trend_today = "上漲" if today_change > 0 else "下跌" if today_change < 0 else "平盤"
 
-    # market_effect 判斷
+    # market_effect 判斷（以 standardized 與 today_change 方向為依據）
     dir_sign = 1 if standardized > 0 else (-1 if standardized < 0 else 0)
     today_sign = 1 if today_change > 0 else (-1 if today_change < 0 else 0)
     if dir_sign != 0 and today_sign != 0:
         if dir_sign == today_sign:
-            market_effect = "今日走勢與新聞方向同向。"
+            market_effect = "今日走勢與新聞方向同向，市場走勢強化新聞信號。"
         else:
-            market_effect = "今日走勢與新聞方向相反。"
+            market_effect = "今日走勢與新聞方向相反，市場走勢可能已提前消化或抵銷新聞影響。"
     else:
-        market_effect = "今日走勢或新聞方向中性。"
+        market_effect = "今日走勢或新聞方向中性，無明顯強化/抵銷判斷。"
 
-    # 情緒分數映射（-10~+10）
+    # 情緒分數映射（-10~+10），利用 standardized * 3（並 clamp）
     mood_score = max(-10, min(10, int(round(standardized * 3))))
 
-    # 形成 concise reason：從 reason_lines 中挑最重要的 3 條關鍵描述（去重）
-    short_reasons = []
-    seen = set()
-    for line in reason_lines:
-        # 提取有意義短語（去掉「新聞[...]摘要：」字樣）
-        phrase = re.sub(r"新聞\[\d+\]摘要：", "", line).strip()
-        # 取第一句話或前 60 字
-        phrase = phrase.split("。")[0][:120]
-        if phrase and phrase not in seen:
-            short_reasons.append(phrase)
-            seen.add(phrase)
-        if len(short_reasons) >= 3:
-            break
+    # 加上背離偵測結果（如果有）
+    if divergence:
+        reason_lines.append(f"市場背離檢測：{divergence}")
 
-    # 若 short_reasons 空，放 fallback
-    if not short_reasons:
-        short_reasons = ["市場消息綜合影響"]
+    # 構造最終原因（限制長度但保留細項）
+    detail_reason = "\n".join(reason_lines)
+    summary_reason = f"標準化分數 {standardized:+.2f}；{market_effect} (今日漲跌 {trend_today} {pct}%)"
 
-    # 合成單行輸出（符合使用者格式）
-    reason_text = "；".join(short_reasons)
-    concise_str = f"明天股價走勢：{trend} {symbol} 原因：{reason_text}。 情緒分數：{mood_score:+d}"
+    final_text = (
+        f"明天股價走勢：{trend} {symbol}\n"
+        f"原因：{summary_reason}\n"
+        f"細節：\n{detail_reason}\n"
+        f"情緒分數：{mood_score:+d}"
+    )
+    return final_text
 
-    # 若有 divergence，也把簡短說明加入 top_phrases，但不讓輸出變太長
-    top_phrases = short_reasons.copy()
-    if divergence and divergence != "無明顯背離":
-        top_phrases.append(divergence)
-
-    return concise_str, mood_score, top_phrases
-
-# ---------- Groq analyze（只是包裝硬規則） ----------
+# ---------- 修改：Groq 判斷（已改為硬規則） ----------
 def groq_analyze(news_list, target, avg_score, today_change, adjusted_avg=None, divergence=None):
+    """
+    新版本：使用硬規則（decide_by_hard_rules）替代 LLM。
+    news_list: [(title, score), ...]（程式端已乘上權重）
+    avg_score: 平均情緒分數（保留傳入以便未來使用）
+    today_change: 今日實際漲跌幅 (float)
+    adjusted_avg: 市場調整後的平均分數（可選）
+    divergence: 背離偵測字串（可選）
+    """
     full_texts = [t for t, _ in news_list]
-    concise, mood, top_phrases = decide_by_hard_rules(news_list, today_change, full_texts, adjusted_avg=adjusted_avg, divergence=divergence)
-    # 在結果前加上 target 名稱
-    # 結果已是單行，例如 "明天股價走勢：下跌 🔽 原因：... 情緒分數：-3"
-    return concise.replace("明天股價走勢", f"明天{target}股價走勢", 1)
+    result = decide_by_hard_rules(news_list, today_change, full_texts, adjusted_avg=adjusted_avg, divergence=divergence)
+    # 在結果前加上 target 方便辨識
+    return result.replace("明天股價走勢", f"明天{target}股價走勢", 1)
 
-# ---------- 主分析（與原程式一致） ----------
+# ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
     pos, neg = load_tokens(db)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
@@ -373,6 +363,7 @@ def analyze_target(db, collection, target, result_field):
             if dt.date() != today:
                 continue
             data = d.to_dict() or {}
+            # data 可能包含多個 key，每個 key 是一篇新聞的 dict
             for k, v in data.items():
                 if isinstance(v, dict) and "price_change" in v:
                     today_price_change = parse_price_change(v.get("price_change"))
@@ -380,6 +371,7 @@ def analyze_target(db, collection, target, result_field):
             if today_price_change != 0.0:
                 break
     except Exception:
+        # 若讀取過程有問題，保留 today_price_change = 0.0
         today_price_change = 0.0
 
     # ---------- 原有新聞打分流程（保留） ----------
@@ -414,7 +406,6 @@ def analyze_target(db, collection, target, result_field):
     # ---------- 無新聞 fallback ----------
     if not filtered:
         summary = groq_analyze([], target, 0, today_price_change)
-        mood_score = 0
     else:
         # 去重新聞
         seen_text = set()
@@ -429,14 +420,13 @@ def analyze_target(db, collection, target, result_field):
                 break
 
         # 輸出新聞摘要（console）
-        if not SILENT_MODE:
-            print(f"\n📰 {target} 近期重點新聞（含衝擊）:")
-            for docid, key, title, res, weight, full in top_news:
-                impact_val = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
-                print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact_val/10:.2f}) {title}")
-                for p, w, n in res.hits:
-                    sign = "+" if w>0 else "-"
-                    print(f"   {sign} {p}（{n}）")
+        print(f"\n📰 {target} 近期重點新聞（含衝擊）:")
+        for docid, key, title, res, weight, full in top_news:
+            impact_val = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
+            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact_val/10:.2f}) {title}")
+            for p, w, n in res.hits:
+                sign = "+" if w>0 else "-"
+                print(f"   {sign} {p}（{n}）")
 
         # 構造 news_with_scores 供硬規則使用（保留 title 及加權後分數）
         news_with_scores = []
@@ -446,20 +436,16 @@ def analyze_target(db, collection, target, result_field):
             full_texts.append(full)
 
         # 計算 avg_score（未調整）
-        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores) if news_with_scores else 0.0
+        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
 
-        # === 市場調整 & 背離偵測 ===
+        # === 新增：市場調整 & 背離偵測 ===
         adjusted_avg = adjust_by_market(avg_score, today_price_change)
         divergence = detect_divergence(avg_score, today_price_change)
 
-        # 使用硬規則決策
+        # 使用硬規則決策替代原本的 LLM 呼叫
         summary = groq_analyze(news_with_scores, target, avg_score, today_price_change, adjusted_avg=adjusted_avg, divergence=divergence)
 
-        # 同步 mood_score（從 decide_by_hard_rules 取得更準確數值）
-        # 重新呼叫以獲得 mood_score 與 top_phrases
-        concise, mood_score, top_phrases = decide_by_hard_rules(news_with_scores, today_price_change, full_texts, adjusted_avg=adjusted_avg, divergence=divergence)
-
-        # 本地存檔（保留較多細節於檔案，但 Firestore 只存 concise 字串）
+        # 本地存檔
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
             f.write(f"======= {target} =======\n")
@@ -472,10 +458,9 @@ def analyze_target(db, collection, target, result_field):
                 f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
             f.write(summary + "\n\n")
 
-    # 印出與寫回 Firestore（只寫入 single-line concise string）
     print(summary + "\n")
 
-    # Firestore 寫回（寫單行字串到 result collection under date doc）
+    # Firestore 寫回
     try:
         db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
@@ -487,7 +472,7 @@ def analyze_target(db, collection, target, result_field):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（準確率保留，輸出格式精簡）...\n")
+        print("🚀 開始分析台股焦點股（準確率極致版 - 硬規則 + 市場調整）...\n")
 
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
