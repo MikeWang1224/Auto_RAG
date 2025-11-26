@@ -1,14 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-準確率極致版（短期預測特化） - Context-aware + 去重新聞版
-✅ 嚴格依據情緒分數決策（硬規則量化版）
-✅ 敏感詞加權（單次加成）
-✅ 支援 3 日延遲效應
-✅ Firestore 寫回 + 本地 result.txt 
-✅ 新增句型判斷，避免「重申／預期內」誤判
-✅ 相同新聞內容去重
-✅ 新增：市場漲跌幅調整 & 背離偵測
 """
 import os, signal, regex as re
 from dataclasses import dataclass
