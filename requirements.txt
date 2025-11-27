@@ -5,3 +5,4 @@ numpy==2.2.0
 python-dotenv==1.1.1
 regex==2024.11.6
 rich==14.1.0
+yfinance==0.2.33
