@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-準確率提升版（情緒融合 + 多層權重 + 語意補償 + 漲跌抓取）
+準確率提升版（情緒融合 + 多層權重 + 語意補償）
 ✅ Firestore 寫回 + 本地 result.txt
 ✅ Groq 同時考慮每則情緒分數 + 平均分數
 ✅ 命中多則新聞時提升穩定度
 ✅ 新增：支援 3 天內新聞（延遲效應）
-✅ 新增：抓取 price_change，只抓一次
 """
 
 import os, signal, regex as re
@@ -136,6 +135,7 @@ def groq_analyze(news_list: List[Tuple[str, float]], target: str, avg_score: flo
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞"
 
+    # 將新聞內容與分數整合
     combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
 
     prompt_text = f"""
@@ -174,13 +174,16 @@ def groq_analyze(news_list: List[Tuple[str, float]], target: str, avg_score: flo
         ans = resp.choices[0].message.content.strip()
         ans = re.sub(r"\s+", " ", ans)
 
+        # 提取走勢
         m_trend = re.search(r"(上漲|下跌|不明確|微漲|微跌)", ans)
         trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
 
+        # 提取理由
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
         reason = m_reason.group(1).strip() if m_reason else "市場觀望"
 
+        # 提取情緒分數
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
         mood_score = int(m_score.group(1)) if m_score else 0
 
@@ -189,6 +192,7 @@ def groq_analyze(news_list: List[Tuple[str, float]], target: str, avg_score: flo
     except Exception as e:
         return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
 
+
 # ---------- 主分析 ----------
 def analyze_target(db, collection: str, target: str, result_field: str):
     pos, neg = load_tokens(db)
@@ -196,7 +200,6 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 
     today = datetime.now(TAIWAN_TZ).date()
     filtered, weighted_scores = [], []
-    price_change_recorded = None  # 新增：只抓一次
 
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
@@ -205,20 +208,22 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         news_date = dt.date()
         delta_days = (today - news_date).days
 
+        # 延長時間窗（支援 1~2 天延遲效應，最多取 3 天內）
         if delta_days > 2:
             continue
 
-        day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
+        # 根據時間給不同權重（越久影響越弱）
+        if delta_days == 0:
+            day_weight = 1.0   # 今日新聞權重最高
+        elif delta_days == 1:
+            day_weight = 0.85  # 昨日稍弱
+        else:
+            day_weight = 0.7   # 前天再弱一些
 
         data = d.to_dict() or {}
         for k, v in data.items():
             if not isinstance(v, dict):
                 continue
-
-            # ---------- 抓 price_change ----------
-            if price_change_recorded is None:
-                price_change_recorded = v.get("price_change", None)
-
             title, content = v.get("title", ""), v.get("content", "")
             full = title + " " + content
             res = score_text(full, pos_c, neg_c, target)
@@ -232,6 +237,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             weighted_scores.append(res.score * total_weight)
 
     if not filtered:
+        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze([], target, 0)
     else:
         filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
@@ -255,17 +261,12 @@ def analyze_target(db, collection: str, target: str, result_field: str):
                 f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
             f.write(summary + "\n\n")
 
-    # ---------- 將 price_change 加入 summary ----------
-    if price_change_recorded:
-        summary += f"\n近期股價變動：{price_change_recorded}"
-
     print(summary + "\n")
 
     try:
         db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
             "result": summary,
-            "price_change": price_change_recorded,  # 寫回 Firestore
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
@@ -273,7 +274,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（準確率提升版 + 漲跌抓取）...\n")
+        print("🚀 開始分析台股焦點股（準確率提升版）...\n")
 
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
