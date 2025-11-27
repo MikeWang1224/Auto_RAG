@@ -324,8 +324,6 @@ def decide_by_hard_rules(news_list: List[Tuple[str, float]], today_change: float
 
     final_text = (
         f"明天股價走勢：{trend} {symbol}\n"
-        f"原因：{summary_reason}\n"
-        f"細節：\n{detail_reason}\n"
         f"情緒分數：{mood_score:+d}"
     )
     return final_text
