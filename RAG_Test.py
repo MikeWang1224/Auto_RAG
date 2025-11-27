@@ -70,7 +70,6 @@ def parse_docid_time(doc_id: str):
     except:
         return None
 
-# ---------- 新增：解析 price_change ----------
 def parse_price_change(raw: str) -> float:
     if not raw:
         return 0.0
@@ -138,13 +137,14 @@ def groq_analyze_llm(news_texts: List[str], target: str) -> str:
     prompt = f"請分析以下新聞對 {target} 明日股價的影響，輸出中文說明、情緒分數 (-10~10)、適合 emoji 表示：\n\n"
     prompt += "\n".join(f"- {t}" for t in news_texts)
 
+    # ✅ 使用最新官方支援模型 ID
     response = client.chat.completions.create(
-    model="llama3-70b-8192",
-    messages=[{"role": "user", "content": prompt}],
-    max_tokens=512,  # 這是大部分版本 SDK 都支援的
+        model="llama-3.3-70b-versatile",  # 已退役 llama3-70b-8192 改為此
+        messages=[{"role": "user", "content": prompt}],
     )
 
     result = response.choices[0].message.content
+    return result
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
@@ -152,41 +152,22 @@ def analyze_target(db, collection, target, result_field):
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
     today = datetime.now(TAIWAN_TZ).date()
 
-    filtered, weighted_scores = [], []
-    today_price_change = 0.0
-
-    # 取得今日漲跌幅
-    for d in db.collection(collection).stream():
-        dt = parse_docid_time(d.id)
-        if not dt or dt.date() != today:
-            continue
-        data = d.to_dict() or {}
-        for k, v in data.items():
-            if isinstance(v, dict) and "price_change" in v:
-                today_price_change = parse_price_change(v.get("price_change"))
-                break
-        if today_price_change != 0.0:
-            break
-
-    # 讀取新聞
     news_texts = []
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt:
             continue
-        delta_days = (today - dt.date()).days
-        if delta_days > 2:
+        if (today - dt.date()).days > 2:
             continue
         data = d.to_dict() or {}
-        for k, v in data.items():
-            if not isinstance(v, dict):
-                continue
-            title, content = v.get("title", ""), v.get("content", "")
-            full = title + " " + content
-            res = score_text(full, pos_c, neg_c, target)
-            if not res.hits:
-                continue
-            news_texts.append(full)
+        for v in data.values():
+            if isinstance(v, dict):
+                title, content = v.get("title", ""), v.get("content", "")
+                full = title + " " + content
+                res = score_text(full, pos_c, neg_c, target)
+                if not res.hits:
+                    continue
+                news_texts.append(full)
 
     # 呼叫 Groq LLM
     summary = groq_analyze_llm(news_texts, target)
@@ -197,7 +178,6 @@ def analyze_target(db, collection, target, result_field):
     os.makedirs("results", exist_ok=True)
     with open(fname, "a", encoding="utf-8") as f:
         f.write(f"======= {target} =======\n")
-        f.write(f"今日漲跌：{round(today_price_change*100,2)}%\n")
         f.write(summary + "\n\n")
 
     # Firestore 寫回
