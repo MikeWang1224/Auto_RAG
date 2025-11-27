@@ -1,4 +1,4 @@
-\# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
 使用官方 Groq Python SDK (cl3) 呼叫 LLM。
