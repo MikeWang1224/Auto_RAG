@@ -459,7 +459,7 @@ def analyze_target(db, collection, target, result_field):
     print(summary + "\n")
 
     # Firestore 寫回
-        # 解析預測方向（從 summary 開頭抓）
+           # 解析預測方向（從 summary 開頭抓）
     if "上漲" in summary:
         pred = "上漲"
     elif "微漲" in summary:
@@ -471,15 +471,37 @@ def analyze_target(db, collection, target, result_field):
     else:
         pred = "不明確"
 
-    # Firestore 僅輸出 groq_result + prediction
+    # -------- 新增：自動摘要 40 字原因（不寫全文） --------
+    # 從硬規則結果中找第一句代表原因的句子
+    import re
+    reason_candidate = ""
+    lines = summary.split("\n")
+    for line in lines:
+        if "情緒分數" in line:
+            continue
+        if "走勢" in line:
+            continue
+        reason_candidate = line.strip()
+        break
+
+    # 若抓不到，fallback
+    if not reason_candidate:
+        reason_candidate = "依新聞情緒與市場調整推算明日方向"
+
+    # 限 40 字
+    reason_short = reason_candidate[:40]
+
+    # Firestore 僅輸出三項
     try:
         db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
-            "groq_result": summary,      # 直接存硬規則/Groq結果
-            "prediction": pred,          # 僅存漲跌方向
+            "groq_result": summary,
+            
+            "reason_short": reason_short,
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
+
 
 
 # ---------- 主程式 ----------
