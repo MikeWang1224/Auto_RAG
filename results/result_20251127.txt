@@ -1,20 +1,2 @@
-[warning] Groq LLM 呼叫失敗：Completions.create() got an unexpected keyword argument 'max_output_tokens'
-
-明天股價走勢：微跌 ↘️
-情緒分數：-1
-原因簡短：依新聞情緒與市場調整推算明日方向
-
 ======================================================================
-[warning] Groq LLM 呼叫失敗：Completions.create() got an unexpected keyword argument 'max_output_tokens'
-
-明天股價走勢：微跌 ↘️
-情緒分數：+1
-原因簡短：依新聞情緒與市場調整推算明日方向
-
 ======================================================================
-[warning] Groq LLM 呼叫失敗：Completions.create() got an unexpected keyword argument 'max_output_tokens'
-
-明天股價走勢：微跌 ↘️
-情緒分數：+2
-原因簡短：依新聞情緒與市場調整推算明日方向
-
