@@ -2,13 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-準確率提升版（情緒融合 + 多層權重 + 語意補償）
+準確率提升版（情緒融合 + 多層權重 + 語意補償 + 漲跌抓取）
 ✅ Firestore 寫回 + 本地 result.txt
 ✅ Groq 同時考慮每則情緒分數 + 平均分數
 ✅ 命中多則新聞時提升穩定度
-✅ 支援 3 天內新聞
-✅ 股價漲跌納入 Groq 分析
-✅ 適合 GitHub 自動跑，安全自動結束
+✅ 新增：支援 3 天內新聞（延遲效應）
+✅ 新增：抓取 price_change，只抓一次
 """
 
 import os, signal, regex as re
@@ -22,7 +21,8 @@ from groq import Groq
 # ---------- 設定 ----------
 SILENT_MODE = True
 TAIWAN_TZ = timezone(timedelta(hours=8))
-MAX_NEWS = 100  # GitHub 上安全抓取數量
+SCORE_THRESHOLD = 1.5
+
 TOKENS_COLLECTION = "bull_tokens"
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
@@ -131,7 +131,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
             seen.add(key)
     return MatchResult(score, hits)
 
-# ---------- Groq 分析 ----------
+# ---------- Groq（情緒融合 + 準確率強化） ----------
 def groq_analyze(news_list: List[Tuple[str, float]], target: str, avg_score: float) -> str:
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞"
@@ -196,24 +196,29 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 
     today = datetime.now(TAIWAN_TZ).date()
     filtered, weighted_scores = [], []
-    latest_price_change = None
+    price_change_recorded = None  # 新增：只抓一次
 
-    for i, d in enumerate(db.collection(collection).stream()):
-        if i >= MAX_NEWS or STOP:
-            break
+    for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt:
             continue
         news_date = dt.date()
         delta_days = (today - news_date).days
+
         if delta_days > 2:
             continue
+
         day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
 
         data = d.to_dict() or {}
         for k, v in data.items():
             if not isinstance(v, dict):
                 continue
+
+            # ---------- 抓 price_change ----------
+            if price_change_recorded is None:
+                price_change_recorded = v.get("price_change", None)
+
             title, content = v.get("title", ""), v.get("content", "")
             full = title + " " + content
             res = score_text(full, pos_c, neg_c, target)
@@ -226,15 +231,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             filtered.append((d.id, k, title, res, total_weight))
             weighted_scores.append(res.score * total_weight)
 
-            if latest_price_change is None and "price_change" in v:
-                latest_price_change = v["price_change"]
-
-    if STOP:
-        print("[info] 已停止分析流程")
-        return
-
     if not filtered:
-        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze([], target, 0)
     else:
         filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
@@ -247,11 +244,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
                 print(f"   {'+' if w>0 else '-'} {p}（{n}）")
 
         news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
-        if latest_price_change:
-            news_with_scores.append((f"股價變動：{latest_price_change}", 0.0))
-
-        news_scores = [s for _, s in news_with_scores if s != 0.0]
-        avg_score = sum(news_scores) / max(1, len(news_scores))
+        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
         summary = groq_analyze(news_with_scores, target, avg_score)
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
@@ -260,9 +253,11 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             for docid, key, title, res, weight in top_news:
                 hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
                 f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
-            if latest_price_change:
-                f.write(f"股價變動：{latest_price_change}\n\n")
             f.write(summary + "\n\n")
+
+    # ---------- 將 price_change 加入 summary ----------
+    if price_change_recorded:
+        summary += f"\n近期股價變動：{price_change_recorded}"
 
     print(summary + "\n")
 
@@ -270,6 +265,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
             "result": summary,
+            "price_change": price_change_recorded,  # 寫回 Firestore
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
@@ -277,7 +273,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（準確率提升版）...\n")
+        print("🚀 開始分析台股焦點股（準確率提升版 + 漲跌抓取）...\n")
 
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
