@@ -1,3 +1,4 @@
+#1106
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
@@ -6,7 +7,7 @@
 ✅ Groq 同時考慮每則情緒分數 + 平均分數
 ✅ 命中多則新聞時提升穩定度
 ✅ 新增：支援 3 天內新聞（延遲效應）
-✅ 新增：統一使用當日股價漲跌給 Groq
+✅ 新增：股價漲跌納入 Groq 分析
 """
 
 import os, signal, regex as re
@@ -20,6 +21,7 @@ from groq import Groq
 # ---------- 設定 ----------
 SILENT_MODE = True
 TAIWAN_TZ = timezone(timedelta(hours=8))
+SCORE_THRESHOLD = 1.5
 
 TOKENS_COLLECTION = "bull_tokens"
 NEWS_COLLECTION_TSMC = "NEWS"
@@ -149,7 +151,7 @@ def groq_analyze(news_list: List[Tuple[str, float]], target: str, avg_score: flo
 
 整體平均情緒分數為 {avg_score:+.2f}。
 
-以下是新聞摘要（含情緒分數與當日股價漲跌）：
+以下是新聞摘要（含情緒分數）：
 {combined}
 
 請輸出格式如下：
@@ -193,8 +195,8 @@ def analyze_target(db, collection: str, target: str, result_field: str):
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
 
     today = datetime.now(TAIWAN_TZ).date()
-    filtered = []
-    price_change_today = None
+    filtered, weighted_scores = [], []
+    latest_price_change = None
 
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
@@ -204,10 +206,9 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         delta_days = (today - news_date).days
         if delta_days > 2:
             continue
+        day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
 
-        day_weight = {0: 1.0, 1: 0.85, 2: 0.7}.get(delta_days, 1.0)
         data = d.to_dict() or {}
-
         for k, v in data.items():
             if not isinstance(v, dict):
                 continue
@@ -220,44 +221,47 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
             total_weight = day_weight * token_weight
 
-            filtered.append((title, res, total_weight))
+            filtered.append((d.id, k, title, res, total_weight))
+            weighted_scores.append(res.score * total_weight)
 
-            if price_change_today is None:
-                price_change_today = v.get("price_change", None)
+            if latest_price_change is None and "price_change" in v:
+                latest_price_change = v["price_change"]
 
     if not filtered:
+        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze([], target, 0)
     else:
-        filtered.sort(key=lambda x: abs(x[1].score * x[2]), reverse=True)
+        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
         top_news = filtered[:10]
 
         print(f"\n📰 {target} 近期重點新聞：")
-        for title, res, weight in top_news:
-            print(f"({weight:.2f}x, 分數={res.score:+.2f}) {title}")
+        for docid, key, title, res, weight in top_news:
+            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}) {title}")
             for p, w, n in res.hits:
                 print(f"   {'+' if w>0 else '-'} {p}（{n}）")
 
-        news_with_scores = []
-        for title, res, weight in top_news:
-            t_text = f"{title}"
-            if price_change_today:
-                t_text += f"（當日股價漲跌: {price_change_today}）"
-            news_with_scores.append((t_text, res.score * weight))
+        # 準備送 Groq 的新聞 + 分數
+        news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
+        if latest_price_change:
+            news_with_scores.append((f"股價變動：{latest_price_change}", 0.0))  # 送給 Groq 分析
 
-        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
+        # 平均情緒分數只算新聞，不算股價
+        news_scores = [s for _, s in news_with_scores if s != 0.0]
+        avg_score = sum(news_scores) / max(1, len(news_scores))
         summary = groq_analyze(news_with_scores, target, avg_score)
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
             f.write(f"======= {target} =======\n")
-            for title, res, weight in top_news:
+            for docid, key, title, res, weight in top_news:
                 hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
-                f.write(f"標題：{first_n_sentences(title)}（{weight:.2f}x）\n命中：\n{hits_text}\n\n")
+                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
+            if latest_price_change:
+                f.write(f"股價變動：{latest_price_change}\n\n")
             f.write(summary + "\n\n")
 
     print(summary + "\n")
 
-    # Firestore 寫回
     try:
         db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
