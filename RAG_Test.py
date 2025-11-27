@@ -6,8 +6,9 @@
 ✅ Firestore 寫回 + 本地 result.txt
 ✅ Groq 同時考慮每則情緒分數 + 平均分數
 ✅ 命中多則新聞時提升穩定度
-✅ 新增：支援 3 天內新聞（延遲效應）
-✅ 新增：股價漲跌納入 Groq 分析
+✅ 支援 3 天內新聞
+✅ 股價漲跌納入 Groq 分析
+✅ 適合 GitHub 自動跑，安全自動結束
 """
 
 import os, signal, regex as re
@@ -21,8 +22,7 @@ from groq import Groq
 # ---------- 設定 ----------
 SILENT_MODE = True
 TAIWAN_TZ = timezone(timedelta(hours=8))
-SCORE_THRESHOLD = 1.5
-
+MAX_NEWS = 100  # GitHub 上安全抓取數量
 TOKENS_COLLECTION = "bull_tokens"
 NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
@@ -131,7 +131,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
             seen.add(key)
     return MatchResult(score, hits)
 
-# ---------- Groq（情緒融合 + 準確率強化） ----------
+# ---------- Groq 分析 ----------
 def groq_analyze(news_list: List[Tuple[str, float]], target: str, avg_score: float) -> str:
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞"
@@ -198,7 +198,9 @@ def analyze_target(db, collection: str, target: str, result_field: str):
     filtered, weighted_scores = [], []
     latest_price_change = None
 
-    for d in db.collection(collection).stream():
+    for i, d in enumerate(db.collection(collection).stream()):
+        if i >= MAX_NEWS or STOP:
+            break
         dt = parse_docid_time(d.id)
         if not dt:
             continue
@@ -227,6 +229,10 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             if latest_price_change is None and "price_change" in v:
                 latest_price_change = v["price_change"]
 
+    if STOP:
+        print("[info] 已停止分析流程")
+        return
+
     if not filtered:
         print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze([], target, 0)
@@ -240,12 +246,10 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             for p, w, n in res.hits:
                 print(f"   {'+' if w>0 else '-'} {p}（{n}）")
 
-        # 準備送 Groq 的新聞 + 分數
         news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
         if latest_price_change:
-            news_with_scores.append((f"股價變動：{latest_price_change}", 0.0))  # 送給 Groq 分析
+            news_with_scores.append((f"股價變動：{latest_price_change}", 0.0))
 
-        # 平均情緒分數只算新聞，不算股價
         news_scores = [s for _, s in news_with_scores if s != 0.0]
         avg_score = sum(news_scores) / max(1, len(news_scores))
         summary = groq_analyze(news_with_scores, target, avg_score)
