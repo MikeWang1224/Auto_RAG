@@ -139,12 +139,11 @@ def groq_analyze_llm(news_texts: List[str], target: str) -> str:
     prompt += "\n".join(f"- {t}" for t in news_texts)
 
     response = client.chat.completions.create(
-    messages=[
-        {"role": "user", "content": prompt}
-    ],
-    model="llama3-70b-8192",           # 或你要的模型
-    max_output_tokens=512              # 可選
+    model="llama3-70b-8192",
+    messages=[{"role": "user", "content": prompt}],
+    max_tokens=512,  # 這是大部分版本 SDK 都支援的
     )
+
     result = response.choices[0].message.content
 
 # ---------- 主分析 ----------
