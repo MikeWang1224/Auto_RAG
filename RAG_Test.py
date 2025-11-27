@@ -1,7 +1,7 @@
-# -*- coding: utf-8 -*-
+\# -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-Groq LLM 已更新為正確接口 client.complete()
+使用官方 Groq Python SDK (cl3) 呼叫 LLM。
 """
 import os, signal, regex as re
 from dataclasses import dataclass
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
 from google.cloud import firestore
 from dotenv import load_dotenv
-from groq import Groq
+from groq import Groq  # 官方 SDK
 
 # ---------- 設定 ----------
 SILENT_MODE = True
@@ -20,14 +20,12 @@ NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
 
-# 內部敏感詞表
 SENSITIVE_WORDS = {
     "法說": 1.5, "財報": 1.4, "新品": 1.3, "合作": 1.3,
     "併購": 1.4, "投資": 1.3, "停工": 1.6, "下修": 1.5,
     "利空": 1.5, "爆料": 1.4, "營收": 1.3, "展望": 1.2,
 }
 
-# 硬規則加權
 HARD_WEIGHTS_POS = {
     "財報": 1.5, "法說": 1.5, "展望": 1.5, "資本支出": 1.5,
     "訂單": 1.2, "擴產": 1.2, "爆單": 1.2, "漲價": 1.2,
@@ -46,10 +44,8 @@ signal.signal(signal.SIGINT, _sigint_handler)
 # ---------- 初始化 ----------
 if os.path.exists(".env"):
     load_dotenv(".env", override=True)
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-client = Groq(model="llama3-70b-8192", api_key=os.getenv("GROQ_API_KEY"))
-
-# ---------- 結構 ----------
 @dataclass
 class Token:
     polarity: str
@@ -125,7 +121,6 @@ def compile_tokens(tokens: List[Token]):
             compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
     return compiled
 
-# ---------- Scoring ----------
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
@@ -146,7 +141,6 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
             seen.add(key)
     return MatchResult(score, hits)
 
-# ---------- Context-aware 調整 ----------
 def adjust_score_for_context(text: str, base_score: float) -> float:
     if not text or base_score == 0:
         return base_score
@@ -162,7 +156,6 @@ def adjust_score_for_context(text: str, base_score: float) -> float:
         base_score *= 1.3
     return base_score
 
-# ---------- 市場調整與背離 ----------
 def adjust_by_market(avg_score: float, today_change: float) -> float:
     if today_change >= 0.03: return avg_score + 0.5
     if today_change <= -0.03: return avg_score - 0.5
@@ -171,9 +164,21 @@ def adjust_by_market(avg_score: float, today_change: float) -> float:
     return avg_score
 
 def detect_divergence(avg_score: float, today_change: float) -> str:
-    if avg_score > 1.0 and today_change < -0.02: return "利多不漲（疑似主力出貨）"
-    if avg_score < -1.0 and today_change > 0.02: return "利空不跌（可能有隱性利多）"
+    if avg_score > 1.0 and today_change < -0.02:
+        return "利多不漲（疑似主力出貨）"
+    if avg_score < -1.0 and today_change > 0.02:
+        return "利空不跌（可能有隱性利多）"
     return "無明顯背離"
+
+# ---------- Groq LLM 分析 ----------
+def call_groq_llm(prompt: str) -> str:
+    resp = client.chat.completions.create(
+        model="llama3-70b-8192",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.4,
+        max_tokens=200,
+    )
+    return resp.choices[0].message.content
 
 # ---------- 硬規則決策 ----------
 def decide_by_hard_rules(news_list: List[Tuple[str, float]], today_change: float, full_texts: List[str] = None, adjusted_avg: float = None, divergence: str = None) -> str:
@@ -186,57 +191,27 @@ def decide_by_hard_rules(news_list: List[Tuple[str, float]], today_change: float
         add = 0.0
         txt = (full_texts[idx] if full_texts and idx < len(full_texts) else title).lower()
         for kw, v in HARD_WEIGHTS_POS.items():
-            if kw in txt:
-                add += v
-                reason_lines.append(f"新聞[{idx+1}] 包含正向關鍵詞「{kw}」，加成 {v:+.2f}")
-                break
+            if kw in txt: add += v; break
         for kw, v in HARD_WEIGHTS_NEG.items():
-            if kw in txt:
-                add += v
-                reason_lines.append(f"新聞[{idx+1}] 包含負向關鍵詞「{kw}」，加成 {v:+.2f}")
-                break
+            if kw in txt: add += v; break
         contrib = base + add
         contributions.append(contrib)
-        reason_lines.append(f"新聞[{idx+1}]：標題「{first_n_sentences(title,1)}」，基礎貢獻 {base:+.2f}，加權後 {contrib:+.2f}")
     total_score = sum(contributions)
-    standardized = total_score / (n + 1)
-    if adjusted_avg is not None:
-        standardized = adjusted_avg
-        reason_lines.append(f"（已套用市場漲跌幅調整，使用調整後分數 {standardized:+.2f}）")
+    standardized = adjusted_avg if adjusted_avg is not None else total_score / (n + 1)
+    # impact
     if standardized >= 2.5: trend, symbol = "上漲", "🔼"
     elif standardized >= 1.0: trend, symbol = "微漲", "↗️"
     elif standardized > -1.0: trend, symbol = "微跌", "↘️"
     else: trend, symbol = "下跌", "🔽"
     pct = round(today_change * 100, 2)
-    trend_today = "上漲" if today_change > 0 else "下跌" if today_change < 0 else "平盤"
-    dir_sign = 1 if standardized > 0 else (-1 if standardized < 0 else 0)
-    today_sign = 1 if today_change > 0 else (-1 if today_change < 0 else 0)
-    market_effect = ("今日走勢與新聞方向同向，市場走勢強化新聞信號。" 
-                     if dir_sign == today_sign and dir_sign !=0 else
-                     "今日走勢或新聞方向中性，無明顯強化/抵銷判斷。")
     mood_score = max(-10, min(10, int(round(standardized * 3))))
-    if divergence: reason_lines.append(f"市場背離檢測：{divergence}")
-    detail_reason = "\n".join(reason_lines)
-    summary_reason = f"標準化分數 {standardized:+.2f}；{market_effect} (今日漲跌 {trend_today} {pct}%)"
-    final_text = (
-        f"明天股價走勢：{trend} {symbol}\n"
-        f"原因：{summary_reason}\n"
-        f"細節：\n{detail_reason}\n"
-        f"情緒分數：{mood_score:+d}"
-    )
+    final_text = f"明天股價走勢：{trend} {symbol}\n情緒分數：{mood_score:+d}\n市場背離檢測：{divergence}"
     return final_text
 
-# ---------- Groq 呼叫 ----------
-def groq_analyze_with_llm(news_list, target):
-    # 組 prompt
-    news_text = "\n".join([f"- {title}" for title, _ in news_list])
-    prompt = f"分析以下新聞對 {target} 股價的影響，給出走勢與短原因:\n{news_text}\n格式：明天股價走勢：...；原因短句 40字內"
-    try:
-        result = client.complete(prompt)
-        return result
-    except Exception as e:
-        print(f"[warning] Groq LLM 呼叫失敗，改用硬規則: {e}")
-        return None
+def groq_analyze(news_list, target, avg_score, today_change, adjusted_avg=None, divergence=None):
+    full_texts = [t for t, _ in news_list]
+    # 目前仍用硬規則，如果要 LLM 可呼叫 call_groq_llm(prompt)
+    return decide_by_hard_rules(news_list, today_change, full_texts, adjusted_avg, divergence).replace("明天股價走勢", f"明天{target}股價走勢")
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
@@ -245,7 +220,8 @@ def analyze_target(db, collection, target, result_field):
     today = datetime.now(TAIWAN_TZ).date()
     filtered, weighted_scores = [], []
     today_price_change = 0.0
-    # 先掃今日漲跌
+
+    # 取得今日 price_change
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt or dt.date() != today: continue
@@ -255,63 +231,67 @@ def analyze_target(db, collection, target, result_field):
                 today_price_change = parse_price_change(v.get("price_change"))
                 break
         if today_price_change != 0.0: break
-    # 打分
+
+    # 原有新聞打分流程
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt: continue
-        delta_days = (today - dt.date()).days
-        if delta_days > 2: continue
-        day_weight = 1.0 if delta_days==0 else 0.85 if delta_days==1 else 0.7
+        if (today - dt.date()).days > 2: continue
         data = d.to_dict() or {}
-        for k,v in data.items():
+        for k, v in data.items():
             if not isinstance(v, dict): continue
-            title, content = v.get("title",""), v.get("content","")
-            full = title+" "+content
+            title, content = v.get("title", ""), v.get("content", "")
+            full = title + " " + content
             res = score_text(full, pos_c, neg_c, target)
             if not res.hits: continue
             adj_score = adjust_score_for_context(full, res.score)
-            token_weight = 1.0 + min(len(res.hits)*0.05, 0.3)
-            impact = 1.0 + sum(w*0.05 for k_sens,w in SENSITIVE_WORDS.items() if k_sens in full)
-            total_weight = day_weight*token_weight*impact
-            filtered.append((d.id,k,title,full,res,total_weight))
-            weighted_scores.append(adj_score*total_weight)
+            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
+            impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
+            total_weight = token_weight * impact
+            filtered.append((d.id, k, title, full, res, total_weight))
+            weighted_scores.append(adj_score * total_weight)
+
     if not filtered:
-        summary = decide_by_hard_rules([], today_price_change)
+        summary = groq_analyze([], target, 0, today_price_change)
     else:
-        seen_text = set(); top_news = []
-        for docid,key,title,full,res,weight in sorted(filtered, key=lambda x: abs(x[4].score*x[5]), reverse=True):
+        seen_text, top_news = set(), []
+        for docid, key, title, full, res, weight in sorted(filtered, key=lambda x: abs(x[4].score * x[5]), reverse=True):
             news_text = normalize(full)
             if news_text in seen_text: continue
             seen_text.add(news_text)
-            top_news.append((docid,key,title,res,weight,full))
-            if len(top_news)>=10: break
-        news_with_scores = [(title,res.score*weight) for _,_,title,res,weight,_ in top_news]
-        full_texts = [full for _,_,_,_,_,full in top_news]
-        avg_score = sum(s for _,s in news_with_scores)/len(news_with_scores)
+            top_news.append((docid, key, title, res, weight, full))
+            if len(top_news) >= 10: break
+        news_with_scores, full_texts = [], []
+        for _, _, title, res, weight, full in top_news:
+            news_with_scores.append((title, res.score * weight))
+            full_texts.append(full)
+        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
         adjusted_avg = adjust_by_market(avg_score, today_price_change)
         divergence = detect_divergence(avg_score, today_price_change)
-        # 嘗試 Groq LLM
-        llm_result = groq_analyze_with_llm(news_with_scores, target)
-        summary = llm_result or decide_by_hard_rules(news_with_scores, today_price_change, full_texts, adjusted_avg, divergence)
-    print(summary+"\n")
+        summary = groq_analyze(news_with_scores, target, avg_score, today_price_change, adjusted_avg, divergence)
+
+        # 存檔
+        fname = f"results/result_{today.strftime('%Y%m%d')}.txt"
+        os.makedirs("results", exist_ok=True)
+        with open(fname, "a", encoding="utf-8") as f:
+            f.write(f"======= {target} =======\n{summary}\n\n")
+
+    print(summary)
+    # Firestore 寫回
     try:
         db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
-            "groq_result": summary,
+            "result": summary,
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
 
 # ---------- 主程式 ----------
 def main():
-    if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股...\n")
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
-    print("="*70)
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
-    print("="*70)
     analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
