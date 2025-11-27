@@ -138,11 +138,14 @@ def groq_analyze_llm(news_texts: List[str], target: str) -> str:
     prompt = f"請分析以下新聞對 {target} 明日股價的影響，輸出中文說明、情緒分數 (-10~10)、適合 emoji 表示：\n\n"
     prompt += "\n".join(f"- {t}" for t in news_texts)
 
-    response = client.chat.create(
-        messages=[{"role": "user", "content": prompt}],
-        max_output_tokens=512
+    response = client.chat.completions.create(
+    messages=[
+        {"role": "user", "content": prompt}
+    ],
+    model="llama3-70b-8192",           # 或你要的模型
+    max_output_tokens=512              # 可選
     )
-    return response.output_text
+    result = response.choices[0].message.content
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
