@@ -460,18 +460,12 @@ def analyze_target(db, collection, target, result_field):
 
     # Firestore 寫回
     try:
-        db.collection(collection).document(f"{today.strftime('%Y%m%d')}_analysis").set({
-            "target": target,
-            "avg_score": avg_score,
-            "adjusted_avg": adjusted_avg,
-            "today_change": today_price_change,
-            "divergence": divergence,
-            "groq_result": groq_text,
-            "updated_at": datetime.now(TAIWAN_TZ).isoformat()
+        db.collection(result_field).document(today.strftime("%Y%m%d")).set({
+            "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
+            "result": summary,
         })
-        print(f"[OK] 已寫回 {target} 分析結果 ✔")
     except Exception as e:
-        print(f"[ERROR] 寫回分析結果失敗：{e}")
+        print(f"[warning] Firestore 寫回失敗：{e}")
 
 # ---------- 主程式 ----------
 def main():
