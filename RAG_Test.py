@@ -459,13 +459,28 @@ def analyze_target(db, collection, target, result_field):
     print(summary + "\n")
 
     # Firestore 寫回
+        # 解析預測方向（從 summary 開頭抓）
+    if "上漲" in summary:
+        pred = "上漲"
+    elif "微漲" in summary:
+        pred = "微漲"
+    elif "微跌" in summary:
+        pred = "微跌"
+    elif "下跌" in summary:
+        pred = "下跌"
+    else:
+        pred = "不明確"
+
+    # Firestore 僅輸出 groq_result + prediction
     try:
         db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
-            "result": summary,
+            "groq_result": summary,      # 直接存硬規則/Groq結果
+            "prediction": pred,          # 僅存漲跌方向
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
+
 
 # ---------- 主程式 ----------
 def main():
