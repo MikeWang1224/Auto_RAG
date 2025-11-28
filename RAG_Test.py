@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-股票新聞分析工具（GitHub Actions 優化版 + 每則新聞詳細輸出）
-🔥 TXT = 每則新聞都分析（UTF-8-SIG 防亂碼）
-🔥 Firestore = Groq 直接輸出 3 行短版（固定格式）
+股票新聞分析工具（GitHub Actions + RAG + Groq + Firebase 完整版）
+TXT = 每則新聞詳細分析
+Firestore = Groq 三行短版輸出
 """
 
 import os
@@ -11,9 +11,11 @@ import regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
+
 from google.cloud import firestore
 from dotenv import load_dotenv
 from groq import Groq
+from sentence_transformers import SentenceTransformer, util
 
 # ---------- 設定 ----------
 SILENT_MODE = True
@@ -27,17 +29,16 @@ NEWS_COLLECTION_UMC = "NEWS_UMC"
 RESULTS_DIR = "results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-STOP = False
-def _sigint_handler(signum, frame):
-    global STOP
-    STOP = True
-    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
-signal.signal(signal.SIGINT, _sigint_handler)
-
 # ---------- 初始化 ----------
 if os.path.exists(".env"):
     load_dotenv(".env", override=True)
+
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+# ---------- Firestore ----------
+def get_db():
+    return firestore.Client()
 
 # ---------- 資料結構 ----------
 @dataclass
@@ -54,9 +55,6 @@ class MatchResult:
     hits: List[Tuple[str, float, str]]
 
 DOCID_RE = re.compile(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$")
-
-def get_db() -> firestore.Client:
-    return firestore.Client()
 
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
@@ -78,8 +76,8 @@ def parse_docid_time(doc_id: str):
     except:
         return None
 
-# ---------- Token 載入 ----------
-def load_tokens(db) -> Tuple[List[Token], List[Token]]:
+# ---------- Token ----------
+def load_tokens(db):
     pos, neg = [], []
     for d in db.collection(TOKENS_COLLECTION).stream():
         data = d.to_dict() or {}
@@ -102,12 +100,12 @@ def compile_tokens(tokens: List[Token]):
             try:
                 compiled.append(("regex", re.compile(t.pattern, re.I), t.weight, t.note, t.pattern))
             except:
-                continue
+                pass
         else:
             compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
     return compiled
 
-# ---------- 計分 ----------
+# ---------- 規則打分 ----------
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
@@ -133,64 +131,70 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
 
     return MatchResult(score, hits)
 
-# ---------- Groq 短版 3 行 ----------
-def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, change="") -> str:
-    if not news_with_scores:
+# ---------- RAG：Embedding 篩選 ----------
+def rag_select(query: str, texts: List[str], top_k=5):
+    if not texts:
+        return []
+    q_emb = embedder.encode(query, convert_to_tensor=True)
+    d_emb = embedder.encode(texts, convert_to_tensor=True)
+    scores = util.cos_sim(q_emb, d_emb)[0]
+    top = scores.topk(k=min(top_k, len(texts)))
+    return [texts[i] for i in top.indices]
+
+# ---------- Groq ----------
+def groq_analyze_batch(news: List[str], target: str) -> str:
+    if not news:
         return f"""明天{target}股價走勢：不明確 ⚖️
 原因：近三日無相關新聞
 情緒分數：0"""
 
-    combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_with_scores))
-    avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
+    combined = "\n".join(news)
 
-    prompt_text = f"""
-你是一位專業台股分析師，請依以下規則輸出答案：
-⚠️ 必須嚴格輸出三行：
+    prompt = f"""
+你是專業台股分析師，請嚴格輸出三行：
+
 明天{target}股價走勢：{{上漲／下跌／不明確}} {{符號}}
 原因：一句原因
 情緒分數：-10~10
 
-平均情緒分數：{avg_score:+.2f}
+新聞內容：
 {combined}
 """
 
     try:
-        resp = client.chat.completions.create(
+        res = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=[{"role":"system","content":"你是專業台股分析師。必須輸出三行短版。"},
-                      {"role":"user","content":prompt_text}],
+            messages=[{"role":"user","content":prompt}],
             temperature=0.1,
-            max_tokens=150,
-            timeout=25
+            max_tokens=100
         )
-        return resp.choices[0].message.content.strip()
+        return res.choices[0].message.content.strip()
     except Exception as e:
         return f"""明天{target}股價走勢：不明確 ⚖️
-原因：Groq 分析失敗：{e}
+原因：Groq 失敗 {e}
 情緒分數：0"""
 
-# ---------- TXT 詳細輸出（UTF-8-SIG） ----------
-def dump_detailed_news(target: str, today, all_news: List[Tuple]):
+# ---------- TXT ----------
+def dump_detailed_news(target, today, rows):
     fname = os.path.join(RESULTS_DIR, f"result_{today.strftime('%Y%m%d')}.txt")
     with open(fname, "a", encoding="utf-8-sig") as f:
-        f.write(f"📰 {target} 近期新聞詳細分析（含衝擊）:\n\n")
-        for docid, key, title, res, weight in all_news:
-            f.write(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}) {first_n_sentences(title)}\n")
-            for patt, w, note in res.hits:
-                sign = "+" if w > 0 else "-"
+        f.write(f"\n📰 {target} 新聞詳細分析：\n\n")
+        for docid, key, title, res, w in rows:
+            f.write(f"[{docid}#{key}] ({w:.2f}x, 分數={res.score:+.2f}) {first_n_sentences(title)}\n")
+            for patt, ww, note in res.hits:
+                sign = "+" if ww > 0 else "-"
                 f.write(f"   {sign} {patt}（{note}）\n")
             f.write("\n")
 
-# ---------- 主分析（新聞分類 + 過濾） ----------
+# ---------- 主流程 ----------
 def analyze_target(db, collection: str, target: str, result_field: str):
     pos, neg = load_tokens(db)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
-
     today = datetime.now(TAIWAN_TZ).date()
-    all_news = []
-    price_change = ""
 
-    # 🔍 公司關鍵字（分類用）
+    all_news = []
+    raw_texts = []
+
     aliases = {
         "台積電": ["台積電", "tsmc", "2330"],
         "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
@@ -198,77 +202,58 @@ def analyze_target(db, collection: str, target: str, result_field: str):
     }
     company_keywords = aliases[target]
 
-    # ---------- Firestore 拉新聞 ----------
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt:
             continue
-        delta_days = (today - dt.date()).days
-        if delta_days > 2:
+        if (today - dt.date()).days > 2:
             continue
-
-        day_weight = {0: 1.0, 1: 0.85, 2: 0.7}.get(delta_days, 0.7)
 
         data = d.to_dict() or {}
         for k, v in data.items():
             if not isinstance(v, dict):
                 continue
 
-            title, content = v.get("title", ""), v.get("content", "")
-            full_text = f"{title} {content}".lower()
+            title = v.get("title", "")
+            content = v.get("content", "")
+            full = f"{title} {content}"
 
-            # 🔥 只分析該公司新聞
-            if not any(key.lower() in full_text for key in company_keywords):
+            if not any(key.lower() in full.lower() for key in company_keywords):
                 continue
 
-            if not price_change:
-                price_change = v.get("price_change", "")
-
-            res = score_text(full_text, pos_c, neg_c, target)
+            res = score_text(full, pos_c, neg_c, target)
             if not res.hits:
                 continue
 
-            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
-            total_weight = day_weight * token_weight
+            all_news.append((d.id, k, title, res, 1.0))
+            raw_texts.append(full)
 
-            all_news.append((d.id, k, title, res, total_weight))
-
-    # ---------- TXT 詳細輸出 ----------
+    # TXT
     if all_news:
         dump_detailed_news(target, today, all_news)
 
-    # ---------- Firestore 短版 ----------
-    if not all_news:
-        summary = groq_analyze_batch([], target, price_change)
-    else:
-        all_news_sorted = sorted(all_news, key=lambda x: abs(x[3].score * x[4]), reverse=True)
-        news_with_scores = [(t, res.score * w) for _, _, t, res, w in all_news_sorted[:10]]
-        summary = groq_analyze_batch(news_with_scores, target, price_change)
+    # RAG 選新聞
+    query = f"{target} 明日股價走勢"
+    rag_news = rag_select(query, raw_texts, 5)
 
-        with open("result.txt", "w", encoding="utf-8-sig") as f:
-            f.write("這是一段中文內容（UTF-8-SIG，不會亂碼）")
-
+    # Groq
+    summary = groq_analyze_batch(rag_news, target)
     print(summary + "\n")
 
-    # Firestore 寫回結果
+    # Firebase
     try:
         db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
-            "result": summary,
+            "result": summary
         })
     except Exception as e:
-        print("[warning] Firestore 寫回失敗：", e)
+        print("[warning] Firestore 寫入失敗:", e)
 
 # ---------- main ----------
 def main():
-    if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股...\n")
-
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
-    print("=" * 70)
     analyze_target(db, NEWS_COLLECTION_FOX, "鴻海", "Groq_result_Foxxcon")
-    print("=" * 70)
     analyze_target(db, NEWS_COLLECTION_UMC, "聯電", "Groq_result_UMC")
 
 if __name__ == "__main__":
