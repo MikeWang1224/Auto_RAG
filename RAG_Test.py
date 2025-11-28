@@ -198,73 +198,61 @@ def groq_analyze(news_list, target, avg_score):
     except Exception as e:
         return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
 # ---------- 主分析 ----------
-def analyze_target(db, collection, target, result_field):
-    pos, neg = load_tokens(db)
-    pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
-    today = datetime.now(TAIWAN_TZ).date()
+def groq_analyze(news_list, target):
+    """
+    news_list: List of tuples (title:str, price_change:str, score:float)
+    target: 公司名稱
+    """
+    if not news_list:
+        return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
 
-    filtered, weighted_scores = [], []
+    avg_score = sum(score for _, _, score in news_list) / len(news_list)
 
-    for d in db.collection(collection).stream():
-        dt = parse_docid_time(d.id)
-        if not dt:
-            continue
-        delta_days = (today - dt.date()).days
-        if delta_days > 2:
-            continue
+    # 將新聞整合成 prompt 文字
+    combined = "\n".join(
+        f"{i+1}. 標題：{title}\n   當日股價漲跌：{pc}\n   情緒分數：{score:+.2f}"
+        for i, (title, pc, score) in enumerate(news_list)
+    )
 
-        day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
-        data = d.to_dict() or {}
+    prompt = f"""
+你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
+依情緒分數與當日股價漲跌，嚴格推論明日股價方向。
 
-        for k, v in data.items():
-            if not isinstance(v, dict):
-                continue
+整體平均情緒分數：{avg_score:+.2f}
 
-            title = v.get("title", "")
-            content = v.get("content", "")
-            price_change = v.get("price_change", "")
+{combined}
 
-            full = f"{title} {content} {price_change}"
-
-            res = score_text(full, pos_c, neg_c, target)
-            if not res.hits:
-                continue
-
-            adj_score = adjust_score_for_context(full, res.score)
-
-            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
-            impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
-            total_weight = day_weight * token_weight * impact
-
-            filtered.append((d.id, k, title, price_change, res, total_weight))
-            weighted_scores.append(adj_score * total_weight)
-
-    if not filtered:
-        summary = groq_analyze([], target, 0)
-    else:
-        filtered.sort(key=lambda x: abs(x[4].score * x[5]), reverse=True)
-        top_news = filtered[:10]
-
-        print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
-        for docid, key, title, price_change, res, weight in top_news:
-            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}) {title} 漲跌={price_change}")
-            for p, w, n in res.hits:
-                print(f"   {'+' if w>0 else '-'} {p}（{n}）")
-
-        news_with_scores = [(t, pc, res.score * weight) for _, _, t, pc, res, weight in top_news]
-        avg_score = sum(s for _, _, s in news_with_scores) / len(news_with_scores)
-        summary = groq_analyze(news_with_scores, target, avg_score)
-
-    print("\n📝 分析結果：")
-    print(summary + "\n")
-
+請給出明天股價走勢、原因及情緒分數（-10~+10）。
+注意：原因文字必須與股價走勢一致，不要出現『方向不明確』或矛盾描述。
+"""
     try:
-        db.collection(result_field).document(today.strftime("%Y%m%d")).set({
-            "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
-            "result": summary,
-        })
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "你是台股量化分析員，需依情緒分數與股價漲跌規則產生結論。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.15,
+            max_tokens=220,
+        )
+        ans = resp.choices[0].message.content.strip()
+        ans = re.sub(r"\s+", " ", ans)
+
+        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
+        trend = m_trend.group(1) if m_trend else "不明確"
+        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
+
+        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
+        reason = m_reason.group(1).strip() if m_reason else "新聞訊息與股價趨勢整合分析得出的結論。"
+
+        m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
+        mood_score = int(m_score.group(1)) if m_score else max(-10, min(10, int(round(avg_score * 3))))
+
+        return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
+
     except Exception as e:
-        print(f"[warning] Firestore 寫回失敗：{e}")
+        return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
+
 
 # ---------- 主程式 ----------
 def main():
