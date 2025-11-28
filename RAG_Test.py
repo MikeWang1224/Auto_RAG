@@ -134,7 +134,6 @@ def adjust_score_for_context(text: str, base_score: float) -> float:
 
 # ---------- 背離偵測 ----------
 def detect_divergence(avg_score: float, top_news: List[Tuple[str,str,str,float,float,str]]) -> str:
-    # top_news: (docid, key, title, res_score, total_weight, price_change)
     price_moves = []
     for _, _, _, res_score, _, pc in top_news:
         m = re.search(r"([+-]?\d+\.?\d*)", str(pc))
@@ -149,11 +148,11 @@ def detect_divergence(avg_score: float, top_news: List[Tuple[str,str,str,float,f
         return "股價走勢與新聞情緒一致，無明顯背離。"
 
 # ---------- Groq ----------
-# ---------- Groq ----------
-def groq_analyze(news_list, target, avg_score):
+def groq_analyze(news_list, target, avg_score, divergence_note=None):
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
     combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t,s) in enumerate(news_list))
+    divergence_text = f"\n此外，背離判斷：{divergence_note}" if divergence_note else ""
     prompt = f"""
 你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
 依情緒分數與內容趨勢，**嚴格推論明日股價方向**。
@@ -168,11 +167,11 @@ def groq_analyze(news_list, target, avg_score):
    -0.5 < 分數 < +0.5 → 不明確 ⚖️
    -2 < 分數 ≤ -0.5 → 微跌 ↘️
    分數 ≤ -2 → 下跌 🔽
-4️⃣ 無論趨勢為何，**務必輸出「原因」**。
+4️⃣ 請同時納入「背離判斷」對股價可能影響的說明{divergence_text}
 
 請用以下格式回答，所有欄位必須出現：
 明天{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
-原因：{{一句 40 字內，說明主要情緒來源}}
+原因：{{一句 40 字內，說明主要情緒來源與背離訊號}}
 情緒分數：{{整數 -10~+10}}
 
 整體平均情緒分數：{avg_score:+.2f}
@@ -194,24 +193,20 @@ def groq_analyze(news_list, target, avg_score):
         trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲":"🔼","微漲":"↗️","微跌":"↘️","下跌":"🔽","不明確":"⚖️"}
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        
         if m_reason and m_reason.group(1).strip() not in ["整體", ""]:
             reason = m_reason.group(1).strip()
         else:
-            # fallback 自動生成原因：取 top3 正負分新聞關鍵詞組合
             pos_news = [t for t,s in news_list if s>0][:3]
             neg_news = [t for t,s in news_list if s<0][:3]
             reason_parts = []
             if pos_news: reason_parts.append("利多新聞如「" + "；".join([first_n_sentences(t,1) for t in pos_news]) + "」")
             if neg_news: reason_parts.append("利空新聞如「" + "；".join([first_n_sentences(t,1) for t in neg_news]) + "」")
             reason = "，".join(reason_parts) if reason_parts else "近期新聞情緒交錯，短線觀望。"
-
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
         mood_score = int(m_score.group(1)) if m_score else max(-10,min(10,int(round(avg_score*3))))
         return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
     except Exception as e:
         return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
-
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
@@ -255,8 +250,7 @@ def analyze_target(db, collection, target, result_field):
         news_with_scores = [(f"{t} 股價變動：{pc}", res.score*weight) for _,_,t,res,weight,pc in top_news]
         avg_score = sum(s for _,s in news_with_scores)/len(news_with_scores)
         divergence_note = detect_divergence(avg_score, top_news)
-        summary = groq_analyze(news_with_scores,target,avg_score)
-        summary += f"\n背離判斷：{divergence_note}"
+        summary = groq_analyze(news_with_scores,target,avg_score, divergence_note)
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname,"a",encoding="utf-8") as f:
