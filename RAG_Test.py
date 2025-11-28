@@ -220,8 +220,9 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 
         # 同步寫入 TXT
         fname = os.path.join(RESULTS_DIR, f"result_{today.strftime('%Y%m%d')}.txt")
-        with open(fname,"a",encoding="utf-8") as f:
-            f.write(summary + "\n\n")
+        with open("result.txt", "w", encoding="utf-8") as f:
+            f.write("這是一段中文內容")
+
 
     print(summary + "\n")
 
