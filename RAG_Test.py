@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-準確率極致版（短期預測特化） - 加入 Context-aware 調整版
+準確率極致版（短期預測特化） - 加入 Context-aware 調整版 + 背離偵測
 ✅ 嚴格依據情緒分數決策
 ✅ 敏感詞加權（法說 / 財報 / 新品 / 停工等）
 ✅ 支援 3 日延遲效應
 ✅ Firestore 寫回 + 本地 result.txt
 ✅ 新增句型判斷，避免「重申／預期內」誤判為利多
 ✅ 新增股價漲跌抓取，與新聞一起送 Groq 分析
+✅ 新增新聞面與股價的背離判斷
 """
 
 import os, signal, regex as re
@@ -27,7 +28,6 @@ NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
 
-# 敏感詞權重（短期影響放大）
 SENSITIVE_WORDS = {
     "法說": 1.5,
     "財報": 1.4,
@@ -214,6 +214,30 @@ def groq_analyze(news_list, target, avg_score):
     except Exception as e:
         return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
 
+# ---------- 背離判斷 ----------
+def detect_divergence(avg_score: float, top_news: List[Tuple[str,float,float,str,str]]) -> str:
+    """
+    top_news: list of (docid, res.score, weight, title, price_change)
+    avg_score: 平均新聞情緒
+    """
+    # 簡單判斷股價方向平均
+    price_moves = []
+    for _, _, _, _, pc in top_news:
+        m = re.search(r"([+-]?\d+\.?\d*)", pc)
+        if m:
+            val = float(m.group(1))
+            price_moves.append(val)
+    if not price_moves:
+        return "無足夠股價資料判斷背離。"
+    avg_price_move = sum(price_moves) / len(price_moves)
+    # 背離判斷
+    if avg_score > 0.5 and avg_price_move < 0:
+        return "新聞偏多但股價下跌，短線可能反彈（正向背離）。"
+    elif avg_score < -0.5 and avg_price_move > 0:
+        return "新聞偏空但股價上漲，短線可能回檔（負向背離）。"
+    else:
+        return "股價走勢與新聞情緒一致，無明顯背離。"
+
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
     pos, neg = load_tokens(db)
@@ -230,7 +254,6 @@ def analyze_target(db, collection, target, result_field):
             continue
         day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
         data = d.to_dict() or {}
-
         for k, v in data.items():
             if not isinstance(v, dict):
                 continue
@@ -252,15 +275,18 @@ def analyze_target(db, collection, target, result_field):
     else:
         filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
         top_news = filtered[:10]
+        news_with_scores = [(f"{t} 股價變動：{pc}", res.score * weight) for _, _, t, res, weight, pc in top_news]
+        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
+        divergence_note = detect_divergence(avg_score, [(d,k,res.score,w,t,pc) for d,k,t,res,w,pc in top_news])
+        summary = groq_analyze(news_with_scores, target, avg_score)
+        summary += f"\n背離提示：{divergence_note}"
+
         print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
         for docid, key, title, res, weight, price_change in top_news:
             impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
             print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title} | 股價變動：{price_change}")
             for p, w, n in res.hits:
                 print(f"   {'+' if w>0 else '-'} {p}（{n}）")
-        news_with_scores = [(f"{t} 股價變動：{pc}", res.score * weight) for _, _, t, res, weight, pc in top_news]
-        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
-        summary = groq_analyze(news_with_scores, target, avg_score)
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
@@ -282,7 +308,7 @@ def analyze_target(db, collection, target, result_field):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（準確率極致版）...\n")
+        print("🚀 開始分析台股焦點股（準確率極致版 + 背離偵測）...\n")
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
     print("=" * 70)
