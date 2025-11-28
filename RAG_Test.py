@@ -192,16 +192,11 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
         m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
         trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲":"🔼","微漲":"↗️","微跌":"↘️","下跌":"🔽","不明確":"⚖️"}
+
+        # ⚡ 只取 Groq 分析原因，不 fallback
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        if m_reason and m_reason.group(1).strip() not in ["整體", ""]:
-            reason = m_reason.group(1).strip()
-        else:
-            pos_news = [t for t,s in news_list if s>0][:3]
-            neg_news = [t for t,s in news_list if s<0][:3]
-            reason_parts = []
-            if pos_news: reason_parts.append("利多新聞如「" + "；".join([first_n_sentences(t,1) for t in pos_news]) + "」")
-            if neg_news: reason_parts.append("利空新聞如「" + "；".join([first_n_sentences(t,1) for t in neg_news]) + "」")
-            reason = "，".join(reason_parts) if reason_parts else "近期新聞情緒交錯，短線觀望。"
+        reason = m_reason.group(1).strip() if m_reason else "Groq分析後未提供原因。"
+
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
         mood_score = int(m_score.group(1)) if m_score else max(-10,min(10,int(round(avg_score*3))))
         return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
