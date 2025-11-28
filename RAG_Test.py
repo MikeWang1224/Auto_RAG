@@ -2,7 +2,7 @@
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
 準確率極致版（短期預測特化） - 加入 Context-aware 調整版
-+ 新增 price_change（依你要求整合，無改動輸出格式）
++ 新增 price_change（依你要求整合）
 """
 
 import os, signal, regex as re
@@ -231,7 +231,6 @@ def analyze_target(db, collection, target, result_field):
             impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
             total_weight = day_weight * token_weight * impact
 
-            # (docid, key, title, price_change, res, weight)
             filtered.append((d.id, k, title, price_change, res, total_weight))
             weighted_scores.append(adj_score * total_weight)
 
@@ -240,7 +239,7 @@ def analyze_target(db, collection, target, result_field):
         summary = groq_analyze([], target, 0)
 
     else:
-        # 🔧 修正排序 (res 在 index 4, weight 在 index 5)
+        # 🔧 修正排序：res 在 index 4, weight 在 index 5
         filtered.sort(key=lambda x: abs(x[4].score * x[5]), reverse=True)
 
         top_news = filtered[:10]
@@ -252,7 +251,6 @@ def analyze_target(db, collection, target, result_field):
             for p, w, n in res.hits:
                 print(f"   {'+' if w>0 else '-'} {p}（{n}）")
 
-        # 塞給 Groq： (title, price_change, weighted score)
         news_with_scores = [(t, pc, res.score * weight) 
                             for _, _, t, pc, res, weight in top_news]
 
@@ -277,7 +275,6 @@ def analyze_target(db, collection, target, result_field):
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
-
 
 # ---------- 主程式 ----------
 def main():
