@@ -193,9 +193,9 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
         trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲":"🔼","微漲":"↗️","微跌":"↘️","下跌":"🔽","不明確":"⚖️"}
 
-        # ⚡ 只取 Groq 分析原因，不 fallback
-        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        reason = m_reason.group(1).strip() if m_reason else "Groq分析後未提供原因。"
+        # ⚡ 取 Groq 原因，若找不到就用前 40 字
+        m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|整體平均情緒分數|$)", ans)
+        reason = m_reason.group(1).strip() if m_reason else ans[:40].strip()
 
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
         mood_score = int(m_score.group(1)) if m_score else max(-10,min(10,int(round(avg_score*3))))
