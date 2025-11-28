@@ -181,7 +181,7 @@ def dump_detailed_news(target: str, today, all_news: List[Tuple]):
                 f.write(f"   {sign} {patt}（{note}）\n")
             f.write("\n")
 
-# ---------- 主分析 ----------
+# ---------- 主分析（新聞分類 + 過濾） ----------
 def analyze_target(db, collection: str, target: str, result_field: str):
     pos, neg = load_tokens(db)
     pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
@@ -190,7 +190,15 @@ def analyze_target(db, collection: str, target: str, result_field: str):
     all_news = []
     price_change = ""
 
-    # Firestore 拉新聞
+    # 🔍 公司關鍵字（分類用）
+    aliases = {
+        "台積電": ["台積電", "tsmc", "2330"],
+        "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
+        "聯電": ["聯電", "umc", "2303"]
+    }
+    company_keywords = aliases[target]
+
+    # ---------- Firestore 拉新聞 ----------
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt:
@@ -199,19 +207,24 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         if delta_days > 2:
             continue
 
-        day_weight = {0:1.0, 1:0.85, 2:0.7}.get(delta_days, 0.7)
+        day_weight = {0: 1.0, 1: 0.85, 2: 0.7}.get(delta_days, 0.7)
 
         data = d.to_dict() or {}
         for k, v in data.items():
             if not isinstance(v, dict):
                 continue
 
+            title, content = v.get("title", ""), v.get("content", "")
+            full_text = f"{title} {content}".lower()
+
+            # 🔥 只分析該公司新聞
+            if not any(key.lower() in full_text for key in company_keywords):
+                continue
+
             if not price_change:
                 price_change = v.get("price_change", "")
 
-            title, content = v.get("title", ""), v.get("content", "")
-            res = score_text(title + " " + content, pos_c, neg_c, target)
-
+            res = score_text(full_text, pos_c, neg_c, target)
             if not res.hits:
                 continue
 
@@ -220,11 +233,11 @@ def analyze_target(db, collection: str, target: str, result_field: str):
 
             all_news.append((d.id, k, title, res, total_weight))
 
-    # TXT 詳細輸出
+    # ---------- TXT 詳細輸出 ----------
     if all_news:
         dump_detailed_news(target, today, all_news)
 
-    # Firestore 短版
+    # ---------- Firestore 短版 ----------
     if not all_news:
         summary = groq_analyze_batch([], target, price_change)
     else:
@@ -232,7 +245,6 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         news_with_scores = [(t, res.score * w) for _, _, t, res, w in all_news_sorted[:10]]
         summary = groq_analyze_batch(news_with_scores, target, price_change)
 
-        # 同步防亂碼測試檔（UTF-8-SIG）
         with open("result.txt", "w", encoding="utf-8-sig") as f:
             f.write("這是一段中文內容（UTF-8-SIG，不會亂碼）")
 
