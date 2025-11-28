@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 # ---------- 設定 ----------
-SILENT_MODE = True
+SILENT_MODE = False  # 改為 False 可以 print 出來
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 TOKENS_COLLECTION = "bull_tokens"
@@ -148,24 +148,23 @@ def groq_analyze(news_list, target, avg_score):
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
 
+    # 將每則新聞明細列出
     combined_entries = []
-    for i, (t, pc, s) in enumerate(news_list):
-        # 明確告知 pc 是「當日股價漲跌」，格式範例 "+5.00 (+0.35%)"
+    for i, (title, pc, score) in enumerate(news_list, 1):
         combined_entries.append(
-            f"{i+1}. ({s:+.2f}) {t}\n   股價當日漲跌（price_change）：{pc}"
+            f"{i}. 標題：{title}\n   當日股價漲跌：{pc}\n   情緒分數：{score:+.2f}"
         )
     combined = "\n".join(combined_entries)
 
     prompt = f"""
 你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
-依情緒分數與內容趨勢，嚴格推論明日股價方向。
-
-注意：每則新聞底下有一個欄位「股價當日漲跌（price_change）」，格式範例如 "+5.00 (+0.35%)"，
-表示該新聞當天該股的市場反應（當日股價漲跌）。請將此欄位視為「當日市場反應」輔助判斷。
+依情緒分數與當日股價漲跌，嚴格推論明日股價方向。
 
 整體平均情緒分數：{avg_score:+.2f}
-以下是新聞摘要（含分數 + 股價當日漲跌反應）：
+
 {combined}
+
+請給出明天股價走勢、原因及情緒分數（-10~+10）。
 """
 
     try:
@@ -239,38 +238,22 @@ def analyze_target(db, collection, target, result_field):
             weighted_scores.append(adj_score * total_weight)
 
     if not filtered:
-        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze([], target, 0)
-
     else:
-        # 正確排序：res 在 index 4, weight 在 index 5
         filtered.sort(key=lambda x: abs(x[4].score * x[5]), reverse=True)
-
         top_news = filtered[:10]
 
         print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
         for docid, key, title, price_change, res, weight in top_news:
-            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
-            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title} 漲跌={price_change}")
+            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}) {title} 漲跌={price_change}")
             for p, w, n in res.hits:
                 print(f"   {'+' if w>0 else '-'} {p}（{n}）")
 
-        # 組給 Groq 的資料： (title, price_change, weighted_score)
-        news_with_scores = [(t, pc, res.score * weight) 
-                            for _, _, t, pc, res, weight in top_news]
-
+        news_with_scores = [(t, pc, res.score * weight) for _, _, t, pc, res, weight in top_news]
         avg_score = sum(s for _, _, s in news_with_scores) / len(news_with_scores)
-
         summary = groq_analyze(news_with_scores, target, avg_score)
 
-        fname = f"result_{today.strftime('%Y%m%d')}.txt"
-        with open(fname, "a", encoding="utf-8") as f:
-            f.write(f"======= {target} =======\n")
-            for docid, key, title, pc, res, weight in top_news:
-                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
-                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n股價反應：{pc}\n命中：\n{hits_text}\n\n")
-            f.write(summary + "\n\n")
-
+    print("\n📝 分析結果：")
     print(summary + "\n")
 
     try:
@@ -283,9 +266,6 @@ def analyze_target(db, collection, target, result_field):
 
 # ---------- 主程式 ----------
 def main():
-    if not SILENT_MODE:
-        print("🚀 開始分析...\n")
-
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
     print("=" * 70)
