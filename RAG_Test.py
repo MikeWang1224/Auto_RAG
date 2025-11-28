@@ -144,31 +144,30 @@ def adjust_score_for_context(text: str, base_score: float) -> float:
     return base_score
 
 # ---------- Groq ----------
+# ---------- Groq ----------
 def groq_analyze(news_list, target, avg_score):
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
 
+    # 將每則新聞明細列出
     combined_entries = []
-    for i, (title, price_change, score) in enumerate(news_list, 1):
+    for i, (title, pc, score) in enumerate(news_list, 1):
         combined_entries.append(
-            f"{i}. 標題：{title}\n   當日股價漲跌：{price_change}\n   情緒分數：{score:+.2f}"
+            f"{i}. 標題：{title}\n   當日股價漲跌：{pc}\n   情緒分數：{score:+.2f}"
         )
     combined = "\n".join(combined_entries)
 
     prompt = f"""
-你是一位專業的台股金融分析師。
-請根據以下「{target}」近三日新聞摘要，依據每則新聞的「情緒分數」和「當日股價漲跌」判斷明天股價走勢。
-
-請分析步驟：
-1. 每則新聞給出對明天股價的影響（正面 / 負面 / 中性），可引用標題與股價漲跌。
-2. 綜合所有新聞，給出明天股價走勢（上漲 / 微漲 / 微跌 / 下跌 / 不明確）。
-3. 給出分析原因（請引用新聞關鍵訊息）。
-4. 給出最終情緒分數（-10到+10）。
+你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
+依情緒分數與當日股價漲跌，嚴格推論明日股價方向。
 
 整體平均情緒分數：{avg_score:+.2f}
 
-新聞摘要：
 {combined}
+
+請給出明天股價走勢、原因及情緒分數（-10~+10）。
+注意：原因文字必須與股價走勢一致，不要出現『方向不明確』或矛盾描述。
+請盡量用簡明文字說明哪些新聞訊息支持此走勢。
 """
 
     try:
@@ -179,7 +178,7 @@ def groq_analyze(news_list, target, avg_score):
                 {"role": "user", "content": prompt},
             ],
             temperature=0.15,
-            max_tokens=300,
+            max_tokens=220,
         )
         ans = resp.choices[0].message.content.strip()
         ans = re.sub(r"\s+", " ", ans)
@@ -189,7 +188,7 @@ def groq_analyze(news_list, target, avg_score):
         symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
 
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        reason = m_reason.group(1).strip() if m_reason else "市場消息混雜，方向不明確。"
+        reason = m_reason.group(1).strip() if m_reason else f"新聞訊息偏向{trend}，預期股價短線上漲。"
 
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
         mood_score = int(m_score.group(1)) if m_score else max(-10, min(10, int(avg_score * 3)))
@@ -198,7 +197,6 @@ def groq_analyze(news_list, target, avg_score):
 
     except Exception as e:
         return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
-
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
     pos, neg = load_tokens(db)
