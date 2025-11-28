@@ -5,7 +5,9 @@
 🔥 Firestore = Groq 直接輸出 3 行短版（固定格式）
 """
 
-import os, signal, regex as re, time
+import os
+import signal
+import regex as re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
@@ -36,7 +38,7 @@ if os.path.exists(".env"):
     load_dotenv(".env", override=True)
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# ---------- 結構 ----------
+# ---------- 資料結構 ----------
 @dataclass
 class Token:
     polarity: str
@@ -52,7 +54,7 @@ class MatchResult:
 
 DOCID_RE = re.compile(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$")
 
-def get_db():
+def get_db() -> firestore.Client:
     return firestore.Client()
 
 def normalize(text: str) -> str:
@@ -75,7 +77,7 @@ def parse_docid_time(doc_id: str):
     except:
         return None
 
-# ---------- Token ----------
+# ---------- Token 載入 ----------
 def load_tokens(db) -> Tuple[List[Token], List[Token]]:
     pos, neg = [], []
     for d in db.collection(TOKENS_COLLECTION).stream():
@@ -103,7 +105,7 @@ def compile_tokens(tokens: List[Token]):
             compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
     return compiled
 
-# ---------- Scoring ----------
+# ---------- 計分 ----------
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
@@ -160,7 +162,7 @@ def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, p
 原因：Groq 分析失敗({e})
 情緒分數：0"""
 
-# ---------- TXT 詳細：每則新聞分析 ----------
+# ---------- TXT 詳細輸出 ----------
 def dump_detailed_news(target: str, today, all_news: List[Tuple]):
     fname = os.path.join(RESULTS_DIR, f"result_{today.strftime('%Y%m%d')}.txt")
     with open(fname, "a", encoding="utf-8") as f:
@@ -204,7 +206,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             total_weight = day_weight * token_weight
             all_news.append((d.id, k, title, res, total_weight))
 
-    # TXT 輸出：每則新聞
+    # TXT 輸出
     if all_news:
         dump_detailed_news(target, today, all_news)
 
@@ -212,12 +214,11 @@ def analyze_target(db, collection: str, target: str, result_field: str):
     if not all_news:
         summary = groq_analyze_batch([], target, price_change)
     else:
-        # 計算 top N 平均分給 Groq
         all_news_sorted = sorted(all_news, key=lambda x: abs(x[3].score*x[4]), reverse=True)
         news_with_scores = [(t,res.score*weight) for _,_,t,res,weight in all_news_sorted[:10]]
         summary = groq_analyze_batch(news_with_scores, target, price_change)
 
-        # 也把 summary 加到 TXT
+        # 同步寫入 TXT
         fname = os.path.join(RESULTS_DIR, f"result_{today.strftime('%Y%m%d')}.txt")
         with open(fname,"a",encoding="utf-8") as f:
             f.write(summary + "\n\n")
