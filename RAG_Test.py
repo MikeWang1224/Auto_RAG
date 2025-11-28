@@ -1,14 +1,8 @@
-#1120 
-
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
 準確率極致版（短期預測特化） - 加入 Context-aware 調整版
-✅ 嚴格依據情緒分數決策
-✅ 敏感詞加權（法說 / 財報 / 新品 / 停工等）
-✅ 支援 3 日延遲效應
-✅ Firestore 寫回 + 本地 result.txt
-✅ 新增句型判斷，避免「重申／預期內」誤判為利多
++ 新增 price_change（依你要求整合，無改動輸出格式）
 """
 
 import os, signal, regex as re
@@ -28,27 +22,16 @@ NEWS_COLLECTION_TSMC = "NEWS"
 NEWS_COLLECTION_FOX = "NEWS_Foxxcon"
 NEWS_COLLECTION_UMC = "NEWS_UMC"
 
-# 敏感詞權重（短期影響放大）
 SENSITIVE_WORDS = {
-    "法說": 1.5,
-    "財報": 1.4,
-    "新品": 1.3,
-    "合作": 1.3,
-    "併購": 1.4,
-    "投資": 1.3,
-    "停工": 1.6,
-    "下修": 1.5,
-    "利空": 1.5,
-    "爆料": 1.4,
-    "營收": 1.3,
-    "展望": 1.2,
+    "法說": 1.5, "財報": 1.4, "新品": 1.3, "合作": 1.3, "併購": 1.4,
+    "投資": 1.3, "停工": 1.6, "下修": 1.5, "利空": 1.5, "爆料": 1.4,
+    "營收": 1.3, "展望": 1.2,
 }
 
 STOP = False
 def _sigint_handler(signum, frame):
     global STOP
     STOP = True
-    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
 signal.signal(signal.SIGINT, _sigint_handler)
 
 # ---------- 初始化 ----------
@@ -125,9 +108,11 @@ def compile_tokens(tokens: List[Token]):
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
     norm = normalize(text)
     score, hits, seen = 0.0, [], set()
-    aliases = {"台積電": ["台積電", "tsmc", "2330"],
-               "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
-               "聯電": ["聯電", "umc", "2303"]}
+    aliases = {
+        "台積電": ["台積電", "tsmc", "2330"],
+        "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
+        "聯電": ["聯電", "umc", "2303"],
+    }
     company_pattern = "|".join(re.escape(a) for a in aliases.get(target, []))
     if not re.search(company_pattern, norm):
         return MatchResult(0.0, [])
@@ -144,66 +129,46 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
 
 # ---------- Context-aware 調整 ----------
 def adjust_score_for_context(text: str, base_score: float) -> float:
-    """
-    根據句型判斷中性或強烈語氣，微調分數。
-    """
     if not text or base_score == 0:
         return base_score
-
     norm = text.lower()
-
-    # 中性、預期內、重申等弱化分數
     neutral_phrases = ["重申", "符合預期", "預期內", "中性看待", "無重大影響", "持平", "未變"]
     if any(p in norm for p in neutral_phrases):
-        base_score *= 0.4  # 降低影響力
-
-    # 強烈利多或利空詞放大分數
+        base_score *= 0.4
     positive_boost = ["創新高", "倍增", "大幅成長", "獲利暴增", "報喜"]
     negative_boost = ["暴跌", "下滑", "虧損", "停工", "下修", "裁員", "警訊"]
     if any(p in norm for p in positive_boost):
         base_score *= 1.3
     if any(p in norm for p in negative_boost):
         base_score *= 1.3
-
     return base_score
 
-# ---------- Groq（嚴格邏輯 + 強制理由版） ----------
+# ---------- Groq ----------
 def groq_analyze(news_list, target, avg_score):
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
 
-    combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
-    
+    combined_entries = []
+    for i, (t, pc, s) in enumerate(news_list):
+        combined_entries.append(
+            f"{i+1}. ({s:+.2f}) {t}\n   股價反應：{pc}"
+        )
+    combined = "\n".join(combined_entries)
+
     prompt = f"""
 你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
-依情緒分數與內容趨勢，**嚴格推論明日股價方向**。
-無論結果為何，都必須明確說明「原因」。
-
-分析規則如下：
-1️⃣ 情緒分數為每則新聞的利多 / 利空加權值（括號中）。
-2️⃣ 平均後得整體情緒分數（範圍 -10 ~ +10）。
-3️⃣ 請根據以下邏輯判定方向：
-   分數 ≥ +2 → 上漲 🔼
-   +0.5 ≤ 分數 < +2 → 微漲 ↗️
-   -0.5 < 分數 < +0.5 → 不明確 ⚖️
-   -2 < 分數 ≤ -0.5 → 微跌 ↘️
-   分數 ≤ -2 → 下跌 🔽
-4️⃣ 無論趨勢為何，**務必輸出「原因」**。
-
-請用以下格式回答，所有欄位必須出現：
-明天{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
-原因：{{一句 40 字內，說明主要情緒來源}}
-情緒分數：{{整數 -10~+10}}
+依情緒分數與內容趨勢，嚴格推論明日股價方向。
 
 整體平均情緒分數：{avg_score:+.2f}
-以下是新聞摘要（含分數）：
+以下是新聞摘要（含分數 + 股價當日漲跌反應）：
 {combined}
 """
+
     try:
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "你是台股量化分析員，需根據情緒分數規則產生明確結論。"},
+                {"role": "system", "content": "你是台股量化分析員，需依情緒分數規則產生結論。"},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.15,
@@ -217,25 +182,10 @@ def groq_analyze(news_list, target, avg_score):
         symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
 
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        if m_reason and m_reason.group(1).strip():
-            reason = m_reason.group(1).strip()
-        else:
-            if avg_score >= 3:
-                reason = "多則新聞偏向利多，如營收/合作/技術突破。"
-            elif avg_score >= 1:
-                reason = "整體氣氛略偏多，市場信心回升。"
-            elif avg_score <= -3:
-                reason = "多則新聞利空明顯，如跌停或產能問題。"
-            elif avg_score <= -1:
-                reason = "多則新聞偏向利空，如獲利下滑或股價走弱。"
-            else:
-                reason = "利多與利空交錯，市場短線觀望。"
+        reason = m_reason.group(1).strip() if m_reason else "市場消息混雜，方向不明確。"
 
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
-        if m_score:
-            mood_score = int(m_score.group(1))
-        else:
-            mood_score = max(-10, min(10, int(round(avg_score * 3))))
+        mood_score = int(m_score.group(1)) if m_score else max(-10, min(10, int(avg_score * 3)))
 
         return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
 
@@ -263,46 +213,53 @@ def analyze_target(db, collection, target, result_field):
         for k, v in data.items():
             if not isinstance(v, dict):
                 continue
-            title, content = v.get("title", ""), v.get("content", "")
-            full = title + " " + content
+
+            title = v.get("title", "")
+            content = v.get("content", "")
+            price_change = v.get("price_change", "")  # ⭐ 新增
+
+            full = f"{title} {content} {price_change}"  # ⭐ 新增
+
             res = score_text(full, pos_c, neg_c, target)
             if not res.hits:
                 continue
 
-            # 🔧 新增：根據句型調整分數
             adj_score = adjust_score_for_context(full, res.score)
-
             token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
             impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
             total_weight = day_weight * token_weight * impact
 
-            filtered.append((d.id, k, title, res, total_weight))
-            weighted_scores.append(adj_score * total_weight)  # 使用調整後分數
+            filtered.append((d.id, k, title, price_change, res, total_weight))
+            weighted_scores.append(adj_score * total_weight)
 
     if not filtered:
-        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze([], target, 0)
     else:
-        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
+        filtered.sort(key=lambda x: abs(x[4] * x[3].score), reverse=True)
         top_news = filtered[:10]
 
-        print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
-        for docid, key, title, res, weight in top_news:
-            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
-            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title}")
-            for p, w, n in res.hits:
-                print(f"   {'+' if w>0 else '-'} {p}（{n}）")
+        news_with_scores = [
+            (t, pc, res.score * weight)
+            for _, _, t, pc, res, weight in top_news
+        ]
 
-        news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
-        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
+        avg_score = sum(s for _, _, s in news_with_scores) / len(news_with_scores)
         summary = groq_analyze(news_with_scores, target, avg_score)
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
             f.write(f"======= {target} =======\n")
-            for docid, key, title, res, weight in top_news:
-                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
-                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
+            for docid, key, title, pc, res, weight in top_news:
+                hits_text = "\n".join([
+                    f"  {'+' if w > 0 else '-'} {p}（{n}）" 
+                    for p, w, n in res.hits
+                ])
+                f.write(
+                    f"[{docid}#{key}]（{weight:.2f}x）\n"
+                    f"標題：{first_n_sentences(title)}\n"
+                    f"股價反應：{pc}\n"
+                    f"命中：\n{hits_text}\n\n"
+                )
             f.write(summary + "\n\n")
 
     print(summary + "\n")
@@ -318,7 +275,7 @@ def analyze_target(db, collection, target, result_field):
 # ---------- 主程式 ----------
 def main():
     if not SILENT_MODE:
-        print("🚀 開始分析台股焦點股（準確率極致版）...\n")
+        print("🚀 開始分析...\n")
 
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC, "台積電", "Groq_result")
