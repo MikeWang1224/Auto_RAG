@@ -148,23 +148,27 @@ def groq_analyze(news_list, target, avg_score):
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
 
-    # 將每則新聞明細列出
     combined_entries = []
-    for i, (title, pc, score) in enumerate(news_list, 1):
+    for i, (title, price_change, score) in enumerate(news_list, 1):
         combined_entries.append(
-            f"{i}. 標題：{title}\n   當日股價漲跌：{pc}\n   情緒分數：{score:+.2f}"
+            f"{i}. 標題：{title}\n   當日股價漲跌：{price_change}\n   情緒分數：{score:+.2f}"
         )
     combined = "\n".join(combined_entries)
 
     prompt = f"""
-你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
-依情緒分數與當日股價漲跌，嚴格推論明日股價方向。
+你是一位專業的台股金融分析師。
+請根據以下「{target}」近三日新聞摘要，依據每則新聞的「情緒分數」和「當日股價漲跌」判斷明天股價走勢。
+
+請分析步驟：
+1. 每則新聞給出對明天股價的影響（正面 / 負面 / 中性），可引用標題與股價漲跌。
+2. 綜合所有新聞，給出明天股價走勢（上漲 / 微漲 / 微跌 / 下跌 / 不明確）。
+3. 給出分析原因（請引用新聞關鍵訊息）。
+4. 給出最終情緒分數（-10到+10）。
 
 整體平均情緒分數：{avg_score:+.2f}
 
+新聞摘要：
 {combined}
-
-請給出明天股價走勢、原因及情緒分數（-10~+10）。
 """
 
     try:
@@ -175,7 +179,7 @@ def groq_analyze(news_list, target, avg_score):
                 {"role": "user", "content": prompt},
             ],
             temperature=0.15,
-            max_tokens=220,
+            max_tokens=300,
         )
         ans = resp.choices[0].message.content.strip()
         ans = re.sub(r"\s+", " ", ans)
