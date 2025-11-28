@@ -149,6 +149,7 @@ def detect_divergence(avg_score: float, top_news: List[Tuple[str,str,str,float,f
         return "股價走勢與新聞情緒一致，無明顯背離。"
 
 # ---------- Groq ----------
+# ---------- Groq ----------
 def groq_analyze(news_list, target, avg_score):
     if not news_list:
         return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
@@ -193,17 +194,24 @@ def groq_analyze(news_list, target, avg_score):
         trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲":"🔼","微漲":"↗️","微跌":"↘️","下跌":"🔽","不明確":"⚖️"}
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
-        reason = m_reason.group(1).strip() if m_reason else \
-            ("多則新聞偏向利多，如營收/合作/技術突破。" if avg_score >=3 else
-             "整體氣氛略偏多，市場信心回升。" if avg_score >=1 else
-             "多則新聞利空明顯，如跌停或產能問題。" if avg_score <=-3 else
-             "多則新聞偏向利空，如獲利下滑或股價走弱。" if avg_score <=-1 else
-             "利多與利空交錯，市場短線觀望。")
+        
+        if m_reason and m_reason.group(1).strip() not in ["整體", ""]:
+            reason = m_reason.group(1).strip()
+        else:
+            # fallback 自動生成原因：取 top3 正負分新聞關鍵詞組合
+            pos_news = [t for t,s in news_list if s>0][:3]
+            neg_news = [t for t,s in news_list if s<0][:3]
+            reason_parts = []
+            if pos_news: reason_parts.append("利多新聞如「" + "；".join([first_n_sentences(t,1) for t in pos_news]) + "」")
+            if neg_news: reason_parts.append("利空新聞如「" + "；".join([first_n_sentences(t,1) for t in neg_news]) + "」")
+            reason = "，".join(reason_parts) if reason_parts else "近期新聞情緒交錯，短線觀望。"
+
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
         mood_score = int(m_score.group(1)) if m_score else max(-10,min(10,int(round(avg_score*3))))
         return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
     except Exception as e:
         return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
+
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
