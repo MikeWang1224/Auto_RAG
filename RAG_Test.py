@@ -199,6 +199,7 @@ def analyze_target(db, collection, target, result_field):
     today = datetime.now(TAIWAN_TZ).date()
 
     filtered, weighted_scores = [], []
+
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt:
@@ -216,50 +217,55 @@ def analyze_target(db, collection, target, result_field):
 
             title = v.get("title", "")
             content = v.get("content", "")
-            price_change = v.get("price_change", "")  # ⭐ 新增
+            price_change = v.get("price_change", "")
 
-            full = f"{title} {content} {price_change}"  # ⭐ 新增
+            full = f"{title} {content} {price_change}"
 
             res = score_text(full, pos_c, neg_c, target)
             if not res.hits:
                 continue
 
             adj_score = adjust_score_for_context(full, res.score)
+
             token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
             impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
             total_weight = day_weight * token_weight * impact
 
+            # (docid, key, title, price_change, res, weight)
             filtered.append((d.id, k, title, price_change, res, total_weight))
             weighted_scores.append(adj_score * total_weight)
 
     if not filtered:
+        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
         summary = groq_analyze([], target, 0)
+
     else:
-        filtered.sort(key=lambda x: abs(x[4] * x[3].score), reverse=True)
+        # 🔧 修正排序 (res 在 index 4, weight 在 index 5)
+        filtered.sort(key=lambda x: abs(x[4].score * x[5]), reverse=True)
+
         top_news = filtered[:10]
 
-        news_with_scores = [
-            (t, pc, res.score * weight)
-            for _, _, t, pc, res, weight in top_news
-        ]
+        print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
+        for docid, key, title, price_change, res, weight in top_news:
+            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
+            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title} 漲跌={price_change}")
+            for p, w, n in res.hits:
+                print(f"   {'+' if w>0 else '-'} {p}（{n}）")
+
+        # 塞給 Groq： (title, price_change, weighted score)
+        news_with_scores = [(t, pc, res.score * weight) 
+                            for _, _, t, pc, res, weight in top_news]
 
         avg_score = sum(s for _, _, s in news_with_scores) / len(news_with_scores)
+
         summary = groq_analyze(news_with_scores, target, avg_score)
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
             f.write(f"======= {target} =======\n")
             for docid, key, title, pc, res, weight in top_news:
-                hits_text = "\n".join([
-                    f"  {'+' if w > 0 else '-'} {p}（{n}）" 
-                    for p, w, n in res.hits
-                ])
-                f.write(
-                    f"[{docid}#{key}]（{weight:.2f}x）\n"
-                    f"標題：{first_n_sentences(title)}\n"
-                    f"股價反應：{pc}\n"
-                    f"命中：\n{hits_text}\n\n"
-                )
+                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
+                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n股價反應：{pc}\n命中：\n{hits_text}\n\n")
             f.write(summary + "\n\n")
 
     print(summary + "\n")
@@ -271,6 +277,7 @@ def analyze_target(db, collection, target, result_field):
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
+
 
 # ---------- 主程式 ----------
 def main():
