@@ -150,14 +150,18 @@ def groq_analyze(news_list, target, avg_score):
 
     combined_entries = []
     for i, (t, pc, s) in enumerate(news_list):
+        # 明確告知 pc 是「當日股價漲跌」，格式範例 "+5.00 (+0.35%)"
         combined_entries.append(
-            f"{i+1}. ({s:+.2f}) {t}\n   股價反應：{pc}"
+            f"{i+1}. ({s:+.2f}) {t}\n   股價當日漲跌（price_change）：{pc}"
         )
     combined = "\n".join(combined_entries)
 
     prompt = f"""
 你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
 依情緒分數與內容趨勢，嚴格推論明日股價方向。
+
+注意：每則新聞底下有一個欄位「股價當日漲跌（price_change）」，格式範例如 "+5.00 (+0.35%)"，
+表示該新聞當天該股的市場反應（當日股價漲跌）。請將此欄位視為「當日市場反應」輔助判斷。
 
 整體平均情緒分數：{avg_score:+.2f}
 以下是新聞摘要（含分數 + 股價當日漲跌反應）：
@@ -239,7 +243,7 @@ def analyze_target(db, collection, target, result_field):
         summary = groq_analyze([], target, 0)
 
     else:
-        # 🔧 修正排序：res 在 index 4, weight 在 index 5
+        # 正確排序：res 在 index 4, weight 在 index 5
         filtered.sort(key=lambda x: abs(x[4].score * x[5]), reverse=True)
 
         top_news = filtered[:10]
@@ -251,6 +255,7 @@ def analyze_target(db, collection, target, result_field):
             for p, w, n in res.hits:
                 print(f"   {'+' if w>0 else '-'} {p}（{n}）")
 
+        # 組給 Groq 的資料： (title, price_change, weighted_score)
         news_with_scores = [(t, pc, res.score * weight) 
                             for _, _, t, pc, res, weight in top_news]
 
