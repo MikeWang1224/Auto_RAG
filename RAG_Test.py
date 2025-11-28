@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-股票新聞分析工具（GitHub Actions 優化版）
+股票新聞分析工具（GitHub Actions 優化版 + 詳細輸出）
 ✅ 批次 Groq 呼叫
 ✅ Firestore 拉取與 scoring 加計時
 ✅ 限制 top_n 篇新聞
 ✅ Log 計時，方便 GitHub Runner 排查
+✅ 新增：完整詳細新聞評分輸出（加權、分數、衝擊、token 命中 note）
 """
 
 import os, signal, regex as re, time
@@ -131,7 +132,7 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
 def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, price_change: str = "") -> str:
     if not news_with_scores:
         reason_text = f"近三日無相關新聞。今日漲跌：{price_change}" if price_change else "近三日無相關新聞"
-        return f"明天{target}股價走勢：不明確 ⚖️\n原因：{reason_text}"
+        return f"明天{target}股價走勢：不明確 ⚖️\n原因：{reason_text}\n情緒分數：0"
 
     combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_with_scores))
 
@@ -140,10 +141,8 @@ def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, p
     prompt_text = f"""
 你是一位金融新聞分析員。
 請閱讀以下關於「{target}」最近三天的新聞摘要，
-以「情緒融合模式」進行情緒總結與走勢預測：
+整體平均情緒分數為 {avg_score:+.2f}：
 
-整體平均情緒分數為 {avg_score:+.2f}。
-以下是新聞摘要（含情緒分數）：
 {combined}
 
 請輸出格式如下：
@@ -156,7 +155,7 @@ def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, p
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "你是專業台股分析師，需綜合情緒與市場反應做出判斷。"},
+                {"role": "system", "content": "你是專業台股分析師。"},
                 {"role": "user", "content": prompt_text},
             ],
             temperature=0.2,
@@ -168,7 +167,7 @@ def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, p
 
         m_trend = re.search(r"(上漲|下跌|不明確|微漲|微跌)", ans)
         trend = m_trend.group(1) if m_trend else "不明確"
-        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
+        symbol_map = {"上漲":"🔼","微漲":"↗️","微跌":"↘️","下跌":"🔽","不明確":"⚖️"}
 
         m_reason = re.search(r"(?:原因|理由)[:：]?\s*(.+?)(?:情緒分數|$)", ans)
         reason = m_reason.group(1).strip() if m_reason else f"市場觀望。今日漲跌：{price_change}"
@@ -180,6 +179,23 @@ def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, p
 
     except Exception as e:
         return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
+
+# ---------- ★ 新增：詳細輸出 ----------
+def dump_detailed_news(target: str, today, top_news: List[Tuple]):
+    fname = f"result_{today.strftime('%Y%m%d')}.txt"
+    with open(fname, "a", encoding="utf-8") as f:
+        f.write(f"📰 {target} 近期重點新聞（含衝擊）:\n\n")
+        for docid, key, title, res, weight in top_news:
+            raw_score = res.score
+            impact = 1.00  # 你目前邏輯固定 impact = 1.0
+            f.write(
+                f"[{docid}#{key}] ({weight:.2f}x, 分數={raw_score:+.2f}, 衝擊={impact:.2f}) "
+                f"{first_n_sentences(title)}\n"
+            )
+            for patt, w, note in res.hits:
+                sign = "+" if w > 0 else "-"
+                f.write(f"   {sign} {patt}（{note}）\n")
+            f.write("\n")
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection: str, target: str, result_field: str):
@@ -233,12 +249,12 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         news_with_scores = [(t, res.score * weight) for _, _, t, res, weight in top_news]
         summary = groq_analyze_batch(news_with_scores, target, price_change)
 
+        # ★ 完整詳細輸出
+        dump_detailed_news(target, today, top_news)
+
+        # 總結加在最後
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
-            f.write(f"======= {target} =======\n")
-            for docid, key, title, res, weight in top_news:
-                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
-                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n命中：\n{hits_text}\n\n")
             f.write(summary + "\n\n")
 
     print(summary + "\n")
