@@ -133,15 +133,6 @@ def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, p
     原因：xxxxx
     情緒分數：-2
     """
-
-    symbol = {
-        "上漲": "🔼",
-        "下跌": "🔽",
-        "不明確": "⚖️",
-        "微漲": "↗️",
-        "微跌": "↘️"
-    }
-
     if not news_with_scores:
         return f"""明天{target}股價走勢：不明確 ⚖️
 原因：近三日無相關新聞。今日漲跌：{price_change}
@@ -166,7 +157,6 @@ def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, p
 
 請依規定格式直接輸出最終答案。
 """
-
     try:
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -180,7 +170,6 @@ def groq_analyze_batch(news_with_scores: List[Tuple[str, float]], target: str, p
         )
         ans = resp.choices[0].message.content.strip()
         return ans
-
     except Exception as e:
         return f"""明天{target}股價走勢：不明確 ⚖️
 原因：Groq 分析失敗({e})
@@ -194,7 +183,7 @@ def dump_detailed_news(target: str, today, top_news: List[Tuple]):
         for docid, key, title, res, weight in top_news:
             raw_score = res.score
             f.write(
-                f"[{docid}#{key}] ({weight:.2f}x, 分數={raw_score:+.2f}) "
+                f"[{docid}#{key}] ({weight:.2f}x, 分數={raw_score:+.2f}, 衝擊=1.00) "
                 f"{first_n_sentences(title)}\n"
             )
             for patt, w, note in res.hits:
@@ -235,7 +224,6 @@ def analyze_target(db, collection: str, target: str, result_field: str):
             total_weight = day_weight * token_weight
             filtered.append((d.id, k, title, res, total_weight))
 
-    # === 沒新聞 ===
     if not filtered:
         summary = groq_analyze_batch([], target, price_change)
     else:
@@ -248,7 +236,7 @@ def analyze_target(db, collection: str, target: str, result_field: str):
         # TXT 詳細版
         dump_detailed_news(target, today, top_news)
 
-        # summary 加到 TXT
+        # TXT 最後加 Groq 總結
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
             f.write(summary + "\n\n")
