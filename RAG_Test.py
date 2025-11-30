@@ -150,12 +150,12 @@ def detect_divergence(avg_score: float, top_news: List[Tuple[str,str,str,float,f
 # ---------- Groq ----------
 def groq_analyze(news_list, target, avg_score, divergence_note=None):
     if not news_list:
-        return f"明天{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
+        return f"隔日{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞\n情緒分數：0"
     combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t,s) in enumerate(news_list))
     divergence_text = f"\n此外，背離判斷：{divergence_note}" if divergence_note else ""
     prompt = f"""
 你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
-依情緒分數與內容趨勢，**嚴格推論明日股價方向**。
+依情緒分數與內容趨勢，**嚴格推論隔日股價方向**。
 無論結果為何，都必須明確說明「原因」。
 
 分析規則如下：
@@ -170,7 +170,7 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
 4️⃣ 請同時納入「背離判斷」對股價可能影響的說明{divergence_text}
 
 請用以下格式回答，所有欄位必須出現：
-明天{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
+隔日{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
 原因：{{一句 40 字內，只能描述新聞與情緒方向，不得提及任何情緒分數、數字、+5、-3 等字樣}}
 情緒分數：{{整數 -10~+10}}
 
@@ -200,9 +200,9 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
 
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
         mood_score = int(m_score.group(1)) if m_score else max(-10,min(10,int(round(avg_score*3))))
-        return f"明天{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
+        return f"隔日{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}\n情緒分數：{mood_score:+d}"
     except Exception as e:
-        return f"明天{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
+        return f"隔日{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
