@@ -136,7 +136,9 @@ def adjust_score_for_context(text: str, base_score: float) -> float:
 def detect_divergence(avg_score: float, top_news: List[Tuple[str,str,str,float,float,str]]) -> str:
     price_moves = []
     for _, _, _, res_score, _, pc in top_news:
-        m = re.search(r"([+-]?\d+\.?\d*)", str(pc))
+        if pc is not None:
+            price_moves.append(pc)
+
         if m: price_moves.append(float(m.group(1)))
     if not price_moves: return "無足夠股價資料判斷背離。"
     avg_price_move = sum(price_moves)/len(price_moves)
@@ -222,8 +224,11 @@ def analyze_target(db, collection, target, result_field):
         for k,v in data.items():
             if not isinstance(v, dict): continue
             title, content = v.get("title",""), v.get("content","")
-            price_change = v.get("price_change","")
-            full = f"{title} {content} 股價變動：{price_change}"
+            price_raw = v.get("price_change", "")
+            price_change = parse_price_change(price_raw)
+
+            full = f"{title} {content} 股價變動：{price_raw}"
+
             res = score_text(full,pos_c,neg_c,target)
             if not res.hits: continue
             adj_score = adjust_score_for_context(full,res.score)
@@ -264,6 +269,27 @@ def analyze_target(db, collection, target, result_field):
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
+
+def parse_price_change(val: str):
+    """只處理百分比，例如 1.5% → 0.015，-3% → -0.03"""
+    if not isinstance(val, str):
+        return None
+
+    val = val.strip()
+
+    # 是否為百分比
+    if val.endswith("%"):
+        try:
+            return float(val[:-1]) / 100.0
+        except:
+            return None
+
+    # 純數字
+    try:
+        return float(val)
+    except:
+        return None
+
 
 # ---------- 主程式 ----------
 def main():
