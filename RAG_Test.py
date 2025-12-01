@@ -148,16 +148,57 @@ def adjust_score_for_context(text: str, base_score: float) -> float:
 
 # ---------- 背離偵測 ----------
 def detect_divergence(avg_score: float, top_news):
-    price_moves = [pc if pc is not None else 0.0 for _, _, _, _, _, pc in top_news]
+    """
+    強化版背離偵測：
+    1. 取前 5 則加權新聞的 price_change
+    2. 避免低分噪音的 fake divergence
+    3. 設定更明確、安全的背離區間判斷
+    """
+
+    # 取前 5 則（已依新聞權重排序過）
+    key_news = top_news[:5]
+
+    price_moves = []
+    strength = []
+
+    for _, _, _, res, weight, price_change in key_news:
+        pc = price_change if price_change is not None else 0.0
+        price_moves.append(pc * weight)     # 用 weight 放大重要新聞
+        strength.append(abs(res.score * weight))
+
     if not price_moves:
-        return "無足夠股價資料判斷背離。"
+        return "無足夠資料判斷背離。"
+
+    # 新增強度濾波：太弱的新聞避免造成假背離
+    avg_strength = sum(strength) / len(strength)
+    if avg_strength < 0.4:
+        return "新聞力道偏弱，無明顯背離。"
+
     avg_price_move = sum(price_moves) / len(price_moves)
-    if avg_score > 0.5 and avg_price_move < 0:
-        return "新聞偏多但股價下跌，短線可能反彈（正向背離）。"
-    elif avg_score < -0.5 and avg_price_move > 0:
-        return "新聞偏空但股價上漲，短線可能回檔（負向背離）。"
-    else:
-        return "股價走勢與新聞情緒一致，無明顯背離。"
+
+    # ==== 新背離判斷 ====
+
+    # 方向明確門檻
+    STRONG = 0.7
+    MEDIUM = 0.35
+
+    # 正向背離（新聞樂觀但股價下跌）
+    if avg_score > STRONG and avg_price_move < -0.2:
+        return "新聞偏強多，但股價顯著下跌，屬正向背離（可能短線反彈）。"
+
+    if avg_score > MEDIUM and avg_price_move < -0.5:
+        return "新聞多方略強，股價卻走弱，可能正向背離。"
+
+    # 負向背離（新聞偏空但股價上漲）
+    if avg_score < -STRONG and avg_price_move > 0.2:
+        return "新聞偏強空，但股價顯著上漲，屬負向背離（可能短線回檔）。"
+
+    if avg_score < -MEDIUM and avg_price_move > 0.5:
+        return "新聞空方略強，股價卻上漲，可能負向背離。"
+
+    # 無背離
+    return "股價走勢與新聞情緒一致，無明顯背離。"
+
 
 # ---------- Groq ----------
 def groq_analyze(news_list, target, avg_score, divergence_note=None):
