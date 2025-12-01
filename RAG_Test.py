@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
-準確率極致版（短期預測特化） - 加入 Context-aware 調整版 + 背離偵測
-✅ 嚴格依據情緒分數決策
-✅ 敏感詞加權（法說 / 財報 / 新品 / 停工等）
-✅ 支援 3 日延遲效應
+完全可跑版（短期預測特化） - Context-aware + 背離偵測
 ✅ Firestore 寫回 + 本地 result.txt
-✅ 新增句型判斷，避免「重申／預期內」誤判為利多
-✅ 新增股價漲跌抓取，與新聞一起送 Groq 分析
-✅ 新增新聞面 vs 股價背離偵測
+✅ 新增股價漲跌抓取與背離分析
+✅ 修正 try/except 與函式縮排問題
 """
 
 import os, signal, regex as re
@@ -80,6 +76,17 @@ def parse_docid_time(doc_id: str):
         return datetime.strptime(ymd + hms, "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
     except: return None
 
+def parse_price_change(val: str):
+    """只處理百分比，例如 1.5% → 0.015，-3% → -0.03，無值預設 0"""
+    if not isinstance(val, str) or not val.strip():
+        return 0.0
+    val = val.strip()
+    if val.endswith("%"):
+        try: return float(val[:-1]) / 100.0
+        except: return 0.0
+    try: return float(val)
+    except: return 0.0
+
 # ---------- Token ----------
 def load_tokens(db):
     pos, neg = [], []
@@ -145,7 +152,6 @@ def detect_divergence(avg_score: float, top_news):
     else:
         return "股價走勢與新聞情緒一致，無明顯背離。"
 
-
 # ---------- Groq ----------
 def groq_analyze(news_list, target, avg_score, divergence_note=None):
     if not news_list:
@@ -154,34 +160,34 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
     divergence_text = f"\n此外，背離判斷：{divergence_note}" if divergence_note else ""
     prompt = f"""
 你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
-依情緒分數與內容趨勢，**嚴格推論隔日股價方向**。
+依情緒分數與內容趨勢，嚴格推論隔日股價方向。
 無論結果為何，都必須明確說明「原因」。
 
 分析規則如下：
 1️⃣ 情緒分數為每則新聞的利多 / 利空加權值（括號中）。
 2️⃣ 平均後得整體情緒分數（範圍 -10 ~ +10）。
-3️⃣ 請根據以下邏輯判定方向：
+3️⃣ 判定方向：
    分數 ≥ +2 → 上漲 🔼
    +0.5 ≤ 分數 < +2 → 微漲 ↗️
    -0.5 < 分數 < +0.5 → 不明確 ⚖️
    -2 < 分數 ≤ -0.5 → 微跌 ↘️
    分數 ≤ -2 → 下跌 🔽
-4️⃣ 請同時納入「背離判斷」對股價可能影響的說明{divergence_text}
+4️⃣ 請同時納入「背離判斷」對股價可能影響{divergence_text}
 
-請用以下格式回答，所有欄位必須出現：
+請用以下格式：
 隔日{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
-原因：{{一句 55 字內，只能描述新聞與情緒方向，不得提及任何情緒分數、數字、+5、-3 等字樣}}
+原因：{{一句 55 字內，只描述新聞與情緒方向}}
 情緒分數：{{整數 -10~+10}}
 
 整體平均情緒分數：{avg_score:+.2f}
-以下是新聞摘要（含分數）：
+新聞摘要（含分數）：
 {combined}
 """
     try:
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content":"你是台股量化分析員，需根據情緒分數規則產生明確結論。"},
+                {"role": "system", "content":"你是台股量化分析員，需依情緒分數產生明確結論。"},
                 {"role": "user", "content":prompt},
             ],
             temperature=0.15,
@@ -191,14 +197,8 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
         m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
         trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲":"🔼","微漲":"↗️","微跌":"↘️","下跌":"🔽","不明確":"⚖️"}
-
-        # ⚡ 取 Groq 原因，若找不到就用前 40 字
         m_reason = re.search(r"(?:原因|理由)[:：]\s*(.*?)(?=\s*(情緒分數[:：]|整體平均情緒分數[:：]|$))",ans,flags=re.DOTALL)
         reason = m_reason.group(1).strip() if m_reason else ""
-
-
-        m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
-        mood_score = int(m_score.group(1)) if m_score else max(-10,min(10,int(round(avg_score*3))))
         return f"下個預測{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}"
     except Exception as e:
         return f"隔日{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
@@ -223,9 +223,7 @@ def analyze_target(db, collection, target, result_field):
             title, content = v.get("title",""), v.get("content","")
             price_raw = v.get("price_change", "")
             price_change = parse_price_change(price_raw)
-
             full = f"{title} {content} 股價變動：{price_raw}"
-
             res = score_text(full,pos_c,neg_c,target)
             if not res.hits: continue
             adj_score = adjust_score_for_context(full,res.score)
@@ -256,35 +254,23 @@ def analyze_target(db, collection, target, result_field):
             for docid,key,title,res,weight,price_change in top_news:
                 hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p,w,n in res.hits])
                 f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n股價變動：{price_change}\n命中：\n{hits_text}\n\n")
-    # 🔹 明確獨立一行寫背離
             f.write(f"★ 背離判斷：{divergence_note}\n")
-    # 🔹 再寫 Groq summary
             f.write(f"下個預測股價走勢：{summary}\n\n")
-
 
         print(summary+"\n")
 
+    # Firestore 寫回
     try:
         db.collection(result_field).document(today.strftime("%Y%m%d")).set({
             "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
             "result": summary,
         })
-
-
-def parse_price_change(val: str):
-    """只處理百分比，例如 1.5% → 0.015，-3% → -0.03，無值預設 0"""
-    if not isinstance(val, str) or not val.strip():
-        return 0.0
-    val = val.strip()
-    if val.endswith("%"):
-        try: return float(val[:-1]) / 100.0
-        except: return 0.0
-    try: return float(val)
-    except: return 0.0
+    except Exception as e:
+        print(f"[warning] Firestore 寫回失敗：{e}")
 
 # ---------- 主程式 ----------
 def main():
-    if not SILENT_MODE: print("🚀 開始分析台股焦點股（準確率極致版）...\n")
+    if not SILENT_MODE: print("🚀 開始分析台股焦點股（完全可跑版）...\n")
     db = get_db()
     analyze_target(db, NEWS_COLLECTION_TSMC,"台積電","Groq_result")
     print("="*70)
