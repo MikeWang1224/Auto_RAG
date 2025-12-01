@@ -263,27 +263,44 @@ def analyze_target(db, collection, target, result_field):
     today = datetime.now(TAIWAN_TZ).date()
 
     filtered = []
+    seen_news = set()  # ⭐ 去重用
+
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         if not dt: continue
         delta_days = (today - dt.date()).days
-        if delta_days>2: continue
-        day_weight = 1.0 if delta_days==0 else 0.85 if delta_days==1 else 0.7
+        if delta_days > 2: continue
+
+        day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
         data = d.to_dict() or {}
 
-        for k,v in data.items():
+        for k, v in data.items():
             if not isinstance(v, dict): continue
-            title, content = v.get("title",""), v.get("content","")
+
+            title, content = v.get("title", ""), v.get("content", "")
+            
+            # ⭐️ 去重邏輯開始
+            full_raw = f"{title}|{content}"
+            if full_raw in seen_news:
+                continue
+            seen_news.add(full_raw)
+            # ⭐️ 去重邏輯結束
+
             price_raw = v.get("price_change", "")
             price_change = parse_price_change(price_raw)
             full = f"{title} {content} 股價變動：{price_raw}"
-            res = score_text(full,pos_c,neg_c,target)
-            if not res.hits: continue
-            adj_score = adjust_score_for_context(full,res.score)
-            token_weight = 1.0 + min(len(res.hits)*0.05,0.3)
-            impact = 1.0 + sum(w*0.05 for k_sens,w in SENSITIVE_WORDS.items() if k_sens in full)
-            total_weight = day_weight*token_weight*impact
-            filtered.append((d.id,k,title,res,total_weight,price_change))
+
+            res = score_text(full, pos_c, neg_c, target)
+            if not res.hits:
+                continue
+
+            adj_score = adjust_score_for_context(full, res.score)
+            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
+            impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
+            total_weight = day_weight * token_weight * impact
+
+            filtered.append((d.id, k, title, res, total_weight, price_change))
+
 
     if not filtered:
         print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
