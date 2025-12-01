@@ -4,7 +4,7 @@
 完全可跑版（短期預測特化） - Context-aware + 背離偵測
 ✅ Firestore 寫回 + 本地 result.txt
 ✅ 新增股價漲跌抓取與背離分析
-✅ 修正 try/except 與函式縮排問題
+✅ 修正 try/except 與函式縮排問題 
 """
 
 import os, signal, regex as re
