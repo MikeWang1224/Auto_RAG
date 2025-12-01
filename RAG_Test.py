@@ -223,10 +223,6 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
 5. 如果有負向背離（新聞空但股價漲），可提示短線可能回檔。
 6. 請只輸出「走勢 + 原因」，原因一句 55 字內。
 
-請只用自然語言描述，例如：
-「新聞多偏向正面，因此可能推動股價上漲」
-「新聞展現保守或負面語氣，可能造成股價承壓」
-
 以下是新聞內容摘要與情緒方向：
 
 背離訊號：
@@ -313,7 +309,7 @@ def analyze_target(db, collection, target, result_field):
 
         # ⭐ 移除情緒分數描述，但保留其他數字 ⭐
         # 移除情緒分數描述與其數字
-        summary = re.sub(r"新聞情緒分數[^\n，。]*?([+\-]?\d+(\.\d+)?)", "", summary_raw)
+        summary = re.sub(r"情緒分數[^\n，。]*?([+\-]?\d+(\.\d+)?)", "", summary_raw)
 
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
