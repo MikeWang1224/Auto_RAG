@@ -133,21 +133,28 @@ def adjust_score_for_context(text: str, base_score: float) -> float:
     return base_score
 
 # ---------- 背離偵測 ----------
-def detect_divergence(avg_score: float, top_news: List[Tuple[str,str,str,float,float,str]]) -> str:
+def detect_divergence(avg_score: float, top_news):
     price_moves = []
-    for _, _, _, res_score, _, pc in top_news:
-        if pc is not None:
+
+    # top_news 結構：
+    # (docid, key, title, res, weight, price_change)
+    # price_change 已經是 float（或 None）
+    for _, _, _, _, _, pc in top_news:
+        if isinstance(pc, (int, float)):
             price_moves.append(pc)
 
-        if m: price_moves.append(float(m.group(1)))
-    if not price_moves: return "無足夠股價資料判斷背離。"
-    avg_price_move = sum(price_moves)/len(price_moves)
+    if not price_moves:
+        return "無足夠股價資料判斷背離。"
+
+    avg_price_move = sum(price_moves) / len(price_moves)
+
     if avg_score > 0.5 and avg_price_move < 0:
         return "新聞偏多但股價下跌，短線可能反彈（正向背離）。"
     elif avg_score < -0.5 and avg_price_move > 0:
         return "新聞偏空但股價上漲，短線可能回檔（負向背離）。"
     else:
         return "股價走勢與新聞情緒一致，無明顯背離。"
+
 
 # ---------- Groq ----------
 def groq_analyze(news_list, target, avg_score, divergence_note=None):
