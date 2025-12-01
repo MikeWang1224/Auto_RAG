@@ -206,16 +206,24 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
         return f"隔日{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞"
 
     combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t,s) in enumerate(news_list))
-    divergence_text = f"\n此外，背離判斷：{divergence_note}" if divergence_note else ""
+    divergence_text = f"注意：{divergence_note}" if divergence_note else "無背離訊號"
 
     prompt = f"""
-你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
-依情緒分數與內容趨勢，嚴格推論隔日股價方向。
-請只輸出「走勢 + 原因」，不要輸出情緒分數。
+你是一位專業台股金融分析師，請根據以下「{target}」近三日新聞摘要與背離訊號，
+依新聞情緒分數及股價背離情況，嚴格推論隔日股價方向。
 
-請用以下格式：
-隔日{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
-原因：{{一句 55 字內，只描述新聞與情緒方向}}
+⚠️ 注意：
+1. 只預測個股，不要提大盤。
+2. 不要輸出任何數字、點數或百分比。
+3. 根據平均新聞情緒：
+   - 平均分數 -0.4 ~ +0.4 → 不明確
+   - 平均分數 > 0.4 → 微漲或上漲
+   - 平均分數 < -0.4 → 微跌或下跌
+4. 如果有正向背離（新聞多但股價跌），可提示短線可能反彈。
+5. 如果有負向背離（新聞空但股價漲），可提示短線可能回檔。
+6. 請只輸出「走勢 + 原因」，原因一句 55 字內。
+
+背離訊號：
 {divergence_text}
 
 整體平均情緒分數：{avg_score:+.2f}
@@ -227,7 +235,7 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content":"你是台股量化分析員，需依情緒分數產生明確結論，但輸出不能包含情緒分數。"},
+                {"role": "system", "content":"你是台股量化分析員，需依情緒分數及背離訊號產生明確結論，輸出不能包含數字。"},
                 {"role": "user", "content":prompt},
             ],
             temperature=0.15,
@@ -235,19 +243,13 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
         )
 
         ans = resp.choices[0].message.content.strip()
-
-        # ⭐ 移除 "情緒分數：" 敘述 ⭐
         ans = re.sub(r"情緒分數[:：]\s*-?\d+(\.\d+)?", "", ans)
-
-        # ⭐ 正規化換行與空白 ⭐
         ans = re.sub(r"\n{2,}", "\n", ans).strip()
 
-        # 抽方向
         m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
         trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲":"🔼","微漲":"↗️","微跌":"↘️","下跌":"🔽","不明確":"⚖️"}
 
-        # 抽原因
         m_reason = re.search(r"(?:原因|理由)[:：]\s*(.*)", ans)
         reason = m_reason.group(1).strip() if m_reason else ""
 
@@ -255,6 +257,7 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
 
     except Exception as e:
         return f"隔日{target}股價走勢：不明確 ⚖️\n原因：Groq分析失敗({e})"
+
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
