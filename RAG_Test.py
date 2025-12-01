@@ -206,30 +206,16 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
         return f"隔日{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞"
 
     combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t,s) in enumerate(news_list))
-    divergence_text = f"注意：{divergence_note}" if divergence_note else "無背離訊號"
+    divergence_text = f"\n此外，背離判斷：{divergence_note}" if divergence_note else ""
 
-    # --- 明確要求輸出格式以降低解析錯誤 ---
     prompt = f"""
-你是一位專業台股金融分析師，請根據以下「{target}」近三日新聞摘要與背離訊號，依新聞情緒分數及股價背離情況，嚴格推論隔日股價方向。
+你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
+依情緒分數與內容趨勢，嚴格推論隔日股價方向。
+請只輸出「走勢 + 原因」，不要輸出情緒分數。
 
-⚠️ 注意：
-1. 只預測個股，不要提大盤。
-2. 不要輸出任何數字、點數或百分比。
-3. 根據平均新聞情緒：
-   - 平均分數 -0.4 ~ +0.4 → 不明確
-   - 平均分數 > 0.4 → 微漲或上漲
-   - 平均分數 < -0.4 → 微跌或下跌
-4. 如果有正向背離（新聞多但股價跌），可提示短線可能反彈。
-5. 如果有負向背離（新聞空但股價漲），可提示短線可能回檔。
-6. 請只輸出「走勢 + 原因」，原因一句 55 字內。
-
-輸出格式請**嚴格遵守**（範例）：
-走勢：上漲
-原因：新聞多為利多且出貨與財報看好，短線買盤續推高股價。
-
-以下是新聞內容摘要與情緒方向：
-
-背離訊號：
+請用以下格式：
+隔日{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
+原因：{{一句 55 字內，只描述新聞與情緒方向}}
 {divergence_text}
 
 整體平均情緒分數：{avg_score:+.2f}
@@ -241,7 +227,7 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content":"你是台股量化分析員，需依情緒分數及背離訊號產生明確結論，輸出不能包含數字，且請照指定格式輸出。"},
+                {"role": "system", "content":"你是台股量化分析員，需依情緒分數產生明確結論，但輸出不能包含情緒分數。"},
                 {"role": "user", "content":prompt},
             ],
             temperature=0.15,
@@ -250,58 +236,25 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
 
         ans = resp.choices[0].message.content.strip()
 
-        # 先嘗試移除「新聞情緒分數: +x.xx」之類雜訊（保留其他文字）
-        ans = re.sub(r"新聞情緒分數[^\n，。]*?([+\-]?\d+(\.\d+)?)", "", ans)
+        # ⭐ 移除 "情緒分數：" 敘述 ⭐
+        ans = re.sub(r"情緒分數[:：]\s*-?\d+(\.\d+)?", "", ans)
+
+        # ⭐ 正規化換行與空白 ⭐
         ans = re.sub(r"\n{2,}", "\n", ans).strip()
 
-        # === 多重方式解析「走勢」與「原因」 ===
-        # 1) 直接抓「走勢：..」與「原因：..」
-        m_trend = re.search(r"走勢[:：]\s*(上漲|微漲|微跌|下跌|不明確)", ans)
-        trend = m_trend.group(1) if m_trend else None
-
-        m_reason = re.search(r"(?:原因|理由)[:：]\s*(.+)", ans)
-        reason = m_reason.group(1).strip() if m_reason else ""
-
-        # 2) 如果沒直接抓到原因，嘗試抓趨勢後面的句子或換行後第一句
-        if not reason:
-            if trend:
-                # 找 trend 出現後同一行或下一行的內容作為原因
-                parts = re.split(r"\n+", ans)
-                # 嘗試在分段中尋找包含趨勢的段落，取該段落後的段落或該段落去掉趨勢後的文字
-                for i,p in enumerate(parts):
-                    if trend in p:
-                        # 先嘗試 p 本身去掉走勢文字後剩下的
-                        rem = re.sub(rf".*{trend}.*[:：]?\s*", "", p).strip()
-                        if rem:
-                            reason = rem; break
-                        # 再嘗試下一段
-                        if i+1 < len(parts) and parts[i+1].strip():
-                            reason = parts[i+1].strip(); break
-
-        # 3) 還沒抓到時，以整段 ans 當備援（去掉首行中的走勢字眼），並截短
-        if not reason:
-            tmp = re.sub(r"(走勢[:：].*?$)", "", ans, flags=re.M).strip()
-            # 移除可能的標題行（走勢或其他標籤）
-            lines = [l.strip() for l in tmp.splitlines() if l.strip()]
-            reason = lines[0] if lines else ans
-
-        # 最後再做一次清理與限制長度（55 字）
-        reason = re.sub(r"\s+", " ", reason).strip()
-        if len(reason) > 55:
-            reason = reason[:52].rstrip() + "…"
-
-        # 確保 trend 有值（沒有就判定為 不明確）
-        if not trend:
-            m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
-            trend = m_trend.group(1) if m_trend else "不明確"
-
+        # 抽方向
+        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
+        trend = m_trend.group(1) if m_trend else "不明確"
         symbol_map = {"上漲":"🔼","微漲":"↗️","微跌":"↘️","下跌":"🔽","不明確":"⚖️"}
+
+        # 抽原因
+        m_reason = re.search(r"(?:原因|理由)[:：]\s*(.*)", ans)
+        reason = m_reason.group(1).strip() if m_reason else ""
 
         return f"下個預測{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}"
 
     except Exception as e:
         return f"隔日{target}股價走勢：不明確 ⚖️\n原因：Groq分析失敗({e})"
-
 
 # ---------- 主分析 ----------
 def analyze_target(db, collection, target, result_field):
@@ -314,51 +267,45 @@ def analyze_target(db, collection, target, result_field):
         dt = parse_docid_time(d.id)
         if not dt: continue
         delta_days = (today - dt.date()).days
-        if delta_days > 2: continue
-        day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
+        if delta_days>2: continue
+        day_weight = 1.0 if delta_days==0 else 0.85 if delta_days==1 else 0.7
         data = d.to_dict() or {}
 
-        for k, v in data.items():
+        for k,v in data.items():
             if not isinstance(v, dict): continue
-            title, content = v.get("title", ""), v.get("content", "")
+            title, content = v.get("title",""), v.get("content","")
             price_raw = v.get("price_change", "")
             price_change = parse_price_change(price_raw)
             full = f"{title} {content} 股價變動：{price_raw}"
-            res = score_text(full, pos_c, neg_c, target)
+            res = score_text(full,pos_c,neg_c,target)
             if not res.hits: continue
-            adj_score = adjust_score_for_context(full, res.score)
-            token_weight = 1.0 + min(len(res.hits)*0.05, 0.3)
+            adj_score = adjust_score_for_context(full,res.score)
+            token_weight = 1.0 + min(len(res.hits)*0.05,0.3)
             impact = 1.0 + sum(w*0.05 for k_sens,w in SENSITIVE_WORDS.items() if k_sens in full)
-            total_weight = day_weight * token_weight * impact
-            filtered.append((d.id, k, title, res, total_weight, price_change))
+            total_weight = day_weight*token_weight*impact
+            filtered.append((d.id,k,title,res,total_weight,price_change))
 
     if not filtered:
         print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
-        summary = groq_analyze([], target, 0)
+        summary = groq_analyze([],target,0)
     else:
-        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
+        filtered.sort(key=lambda x: abs(x[3].score*x[4]),reverse=True)
         top_news = filtered[:10]
         print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
-        for docid, key, title, res, weight, price_change in top_news:
-            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
+        for docid,key,title,res,weight,price_change in top_news:
+            impact = sum(w for k_sens,w in SENSITIVE_WORDS.items() if k_sens in title)
             print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title} | 股價變動：{price_change}")
-            for p, w, n in res.hits: print(f"   {'+' if w>0 else '-'} {p}（{n}）")
-
-        news_with_scores = [(f"{t} 股價變動：{pc}", res.score*weight) for _, _, t, res, weight, pc in top_news]
-        avg_score = sum(s for _, s in news_with_scores)/len(news_with_scores)
+            for p,w,n in res.hits: print(f"   {'+' if w>0 else '-'} {p}（{n}）")
+        news_with_scores = [(f"{t} 股價變動：{pc}", res.score*weight) for _,_,t,res,weight,pc in top_news]
+        avg_score = sum(s for _,s in news_with_scores)/len(news_with_scores)
         divergence_note = detect_divergence(avg_score, top_news)
-        summary_raw = groq_analyze(news_with_scores, target, avg_score, divergence_note)
-
-        # ⭐ 移除情緒分數描述，但保留其他數字 ⭐
-        # 移除情緒分數描述與其數字
-        summary = re.sub(r"新聞情緒分數[^\n，。]*?([+\-]?\d+(\.\d+)?)", "", summary_raw)
-
+        summary = groq_analyze(news_with_scores,target,avg_score, divergence_note)
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
-        with open(fname, "a", encoding="utf-8") as f:
+        with open(fname,"a",encoding="utf-8") as f:
             f.write(f"======= {target} =======\n")
-            for docid, key, title, res, weight, price_change in top_news:
-                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
+            for docid,key,title,res,weight,price_change in top_news:
+                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p,w,n in res.hits])
                 f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n股價變動：{price_change}\n命中：\n{hits_text}\n\n")
             f.write(f"★ 背離判斷：{divergence_note}\n")
             f.write(f"下個預測股價走勢：{summary}\n\n")
@@ -373,7 +320,6 @@ def analyze_target(db, collection, target, result_field):
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
-
 
 # ---------- 主程式 ----------
 def main():
