@@ -306,7 +306,10 @@ def analyze_target(db, collection, target, result_field):
         summary_raw = groq_analyze(news_with_scores, target, avg_score, divergence_note)
 
         # ⭐ 移除情緒分數描述，但保留其他數字 ⭐
-        summary = re.sub(r"情緒分數[:：]?\s*[\+\-]?\d+(\.\d+)?", "", summary_raw).strip()
+        # 移除情緒分數描述與其數字
+        summary = re.sub(r"新聞情緒分數[^\n，。]*?([+\-]?\d+(\.\d+)?)", "", summary_raw)
+        summary = re.sub(r"\s{2,}", " ", summary).strip()  # 清理多餘空白
+
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
         with open(fname, "a", encoding="utf-8") as f:
