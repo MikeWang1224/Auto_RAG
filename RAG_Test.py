@@ -308,7 +308,6 @@ def analyze_target(db, collection, target, result_field):
         # ⭐ 移除情緒分數描述，但保留其他數字 ⭐
         # 移除情緒分數描述與其數字
         summary = re.sub(r"新聞情緒分數[^\n，。]*?([+\-]?\d+(\.\d+)?)", "", summary_raw)
-        summary = re.sub(r"\s{2,}", " ", summary).strip()  # 清理多餘空白
 
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
