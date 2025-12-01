@@ -76,16 +76,23 @@ def parse_docid_time(doc_id: str):
         return datetime.strptime(ymd + hms, "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
     except: return None
 
-def parse_price_change(val: str):
-    """只處理百分比，例如 1.5% → 0.015，-3% → -0.03，無值預設 0"""
+def parse_price_change(val):
+    """解析漲跌幅，支援 '1.5%'、'-3%'、'-20.00 (-1.39%)' 等格式"""
     if not isinstance(val, str) or not val.strip():
         return 0.0
-    val = val.strip()
-    if val.endswith("%"):
-        try: return float(val[:-1]) / 100.0
-        except: return 0.0
-    try: return float(val)
-    except: return 0.0
+
+    # 先抓括號內的百分比: (-1.39%)
+    m = re.search(r"\((-?\d*\.?\d+)%\)", val)
+    if m:
+        return float(m.group(1))
+
+    # 再抓一般格式: -1.39%
+    m = re.search(r"([-+]?\d*\.?\d+)%", val)
+    if m:
+        return float(m.group(1))
+
+    return 0.0
+
 
 # ---------- Token ----------
 def load_tokens(db):
