@@ -5,7 +5,7 @@
 ✅ Firestore 寫回 + 本地 result.txt
 ✅ 新增股價漲跌抓取與背離分析
 ✅ 修正 try/except 與函式縮排問題 
-"""
+""" 
 
 import os, signal, regex as re
 from dataclasses import dataclass
