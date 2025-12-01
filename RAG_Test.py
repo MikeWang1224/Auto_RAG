@@ -266,6 +266,7 @@ def analyze_target(db, collection, target, result_field):
             for docid,key,title,res,weight,price_change in top_news:
                 hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p,w,n in res.hits])
                 f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n股價變動：{price_change}\n命中：\n{hits_text}\n\n")
+            f.write(f"★ 背離判斷：{divergence_note}\n")
             f.write(summary+"\n\n")
     print(summary+"\n")
 
