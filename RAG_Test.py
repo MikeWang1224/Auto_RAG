@@ -200,7 +200,7 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
 
         m_score = re.search(r"情緒分數[:：]?\s*(-?\d+)", ans)
         mood_score = int(m_score.group(1)) if m_score else max(-10,min(10,int(round(avg_score*3))))
-        return f"下個交易日{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}"
+        return f"下個預測{target}股價走勢：{trend} {symbol_map.get(trend,'')}\n原因：{reason}"
     except Exception as e:
         return f"隔日{target}股價走勢：持平 ⚖️\n原因：Groq分析失敗({e})\n情緒分數：0"
 
