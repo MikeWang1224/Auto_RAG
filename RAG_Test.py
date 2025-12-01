@@ -270,45 +270,49 @@ def analyze_target(db, collection, target, result_field):
         dt = parse_docid_time(d.id)
         if not dt: continue
         delta_days = (today - dt.date()).days
-        if delta_days>2: continue
-        day_weight = 1.0 if delta_days==0 else 0.85 if delta_days==1 else 0.7
+        if delta_days > 2: continue
+        day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
         data = d.to_dict() or {}
 
-        for k,v in data.items():
+        for k, v in data.items():
             if not isinstance(v, dict): continue
-            title, content = v.get("title",""), v.get("content","")
+            title, content = v.get("title", ""), v.get("content", "")
             price_raw = v.get("price_change", "")
             price_change = parse_price_change(price_raw)
             full = f"{title} {content} 股價變動：{price_raw}"
-            res = score_text(full,pos_c,neg_c,target)
+            res = score_text(full, pos_c, neg_c, target)
             if not res.hits: continue
-            adj_score = adjust_score_for_context(full,res.score)
-            token_weight = 1.0 + min(len(res.hits)*0.05,0.3)
+            adj_score = adjust_score_for_context(full, res.score)
+            token_weight = 1.0 + min(len(res.hits)*0.05, 0.3)
             impact = 1.0 + sum(w*0.05 for k_sens,w in SENSITIVE_WORDS.items() if k_sens in full)
-            total_weight = day_weight*token_weight*impact
-            filtered.append((d.id,k,title,res,total_weight,price_change))
+            total_weight = day_weight * token_weight * impact
+            filtered.append((d.id, k, title, res, total_weight, price_change))
 
     if not filtered:
         print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
-        summary = groq_analyze([],target,0)
+        summary = groq_analyze([], target, 0)
     else:
-        filtered.sort(key=lambda x: abs(x[3].score*x[4]),reverse=True)
+        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
         top_news = filtered[:10]
         print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
-        for docid,key,title,res,weight,price_change in top_news:
-            impact = sum(w for k_sens,w in SENSITIVE_WORDS.items() if k_sens in title)
+        for docid, key, title, res, weight, price_change in top_news:
+            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
             print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title} | 股價變動：{price_change}")
-            for p,w,n in res.hits: print(f"   {'+' if w>0 else '-'} {p}（{n}）")
-        news_with_scores = [(f"{t} 股價變動：{pc}", res.score*weight) for _,_,t,res,weight,pc in top_news]
-        avg_score = sum(s for _,s in news_with_scores)/len(news_with_scores)
+            for p, w, n in res.hits: print(f"   {'+' if w>0 else '-'} {p}（{n}）")
+
+        news_with_scores = [(f"{t} 股價變動：{pc}", res.score*weight) for _, _, t, res, weight, pc in top_news]
+        avg_score = sum(s for _, s in news_with_scores)/len(news_with_scores)
         divergence_note = detect_divergence(avg_score, top_news)
-        summary = groq_analyze(news_with_scores,target,avg_score, divergence_note)
+        summary_raw = groq_analyze(news_with_scores, target, avg_score, divergence_note)
+
+        # ⭐ 移除情緒分數描述，但保留其他數字 ⭐
+        summary = re.sub(r"情緒分數[:：]?\s*[\+\-]?\d+(\.\d+)?", "", summary_raw).strip()
 
         fname = f"result_{today.strftime('%Y%m%d')}.txt"
-        with open(fname,"a",encoding="utf-8") as f:
+        with open(fname, "a", encoding="utf-8") as f:
             f.write(f"======= {target} =======\n")
-            for docid,key,title,res,weight,price_change in top_news:
-                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p,w,n in res.hits])
+            for docid, key, title, res, weight, price_change in top_news:
+                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p, w, n in res.hits])
                 f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n股價變動：{price_change}\n命中：\n{hits_text}\n\n")
             f.write(f"★ 背離判斷：{divergence_note}\n")
             f.write(f"下個預測股價走勢：{summary}\n\n")
@@ -323,6 +327,7 @@ def analyze_target(db, collection, target, result_field):
         })
     except Exception as e:
         print(f"[warning] Firestore 寫回失敗：{e}")
+
 
 # ---------- 主程式 ----------
 def main():
