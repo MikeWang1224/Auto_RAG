@@ -4,7 +4,7 @@
 完全可跑版（短期預測特化） - Context-aware + 背離偵測
 ⬆️ 修正：今天新聞 100% 會被抓到
 ⬆️ 新增：標題命中但內文沒命中 → 直接排除
-"""  
+"""   
 
 import os, signal, regex as re
 from dataclasses import dataclass
