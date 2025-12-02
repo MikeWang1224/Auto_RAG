@@ -3,6 +3,7 @@
 股票新聞分析工具（多公司 RAG 版：台積電 + 鴻海 + 聯電）
 完全可跑版（短期預測特化） - Context-aware + 背離偵測
 ⬆️ 修正：今天新聞 100% 會被抓到
+⬆️ 新增：標題命中但內文沒命中 → 直接排除
 """ 
 
 import os, signal, regex as re
@@ -67,10 +68,6 @@ def first_n_sentences(text: str, n: int = 3) -> str:
     return "".join(parts[:n]) + ("..." if len(parts) > n else "")
 
 def parse_docid_time(doc_id: str):
-    """
-    修正：如果解析 docID 時間失敗 → 自動視為今天
-    避免今天新聞被忽略
-    """
     m = re.match(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$", doc_id or "")
     if not m:
         return datetime.now(TAIWAN_TZ)
@@ -110,23 +107,18 @@ def compile_tokens(tokens: List[Token]):
     compiled = []
     for t in tokens:
         if t.ttype == "regex":
-            try: compiled.append(("regex", re.compile(t.pattern, re.I), t.weight, t.note, t.pattern))
-            except: continue
+            try:
+                compiled.append(("regex", re.compile(t.pattern, re.I), t.weight, t.note, t.pattern))
+            except:
+                continue
         else:
             compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
     return compiled
 
 # ---------- Scoring ----------
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
-    """
-    新版判斷邏輯：
-    - 以公司別名字串命中為主（標題或內容任一處出現任一別名），才視為相關新聞
-    - 僅抽出包含該公司名稱的句子（分句後）進行 token scoring，避免多家公司互相汙染
-    - 若新聞有提及公司但沒有任何 token 命中，仍回傳一個佔位 hit (weight=0) 以避免被上層直接跳過
-      （此佔位不會影響分數，但可讓原有流程繼續處理該新聞）
-    """
-    if not text or not target:
-        return MatchResult(0.0, [])
+    norm = normalize(text)
+    score, hits, seen = 0.0, [], set()
 
     aliases = {
         "台積電": ["台積電", "tsmc", "2330"],
@@ -134,50 +126,25 @@ def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
         "聯電": ["聯電", "umc", "2303"],
     }
 
-    alias_list = aliases.get(target, [])
-    if not alias_list:
+    company_keywords = aliases.get(target, [])
+    if not any(a.lower() in norm for a in company_keywords):
         return MatchResult(0.0, [])
-
-    # 分句（保留中文與英文標點作為斷句依據）
-    sentences = re.split(r'(?<=[。\.！？!?])\s*', text)
-
-    # 抽取包含公司別名的句子（大小寫不敏感）
-    target_sentences = []
-    for s in sentences:
-        s_lower = (s or "").lower()
-        if any(a.lower() in s_lower for a in alias_list):
-            target_sentences.append(s.strip())
-
-    # 若沒有任何句子包含公司 -> 視為與該公司無關
-    if not target_sentences:
-        return MatchResult(0.0, [])
-
-    # 只在命中句子上做 token scoring（提高訊號純度）
-    joined = " ".join(target_sentences)
-    norm = normalize(joined)
-
-    score = 0.0
-    hits = []
-    seen = set()
 
     for ttype, cre, w, note, patt in pos_c + neg_c:
         key = (patt, note)
         if key in seen:
             continue
-        matched = cre.search(norm) if ttype == "regex" else (patt in norm)
+        matched = cre.search(norm) if ttype == "regex" else patt in norm
         if matched:
             score += w
             hits.append((patt, w, note))
             seen.add(key)
 
-    # 若公司有被提到但沒有任何 token 命中 -> 加入佔位 hit，避免上層以 hits 為空判斷為無關新聞
-    if not hits:
-        hits.append(("<<COMPANY_ONLY>>", 0.0, "company_mentioned_but_no_token_hits"))
-
     return MatchResult(score, hits)
 
 def adjust_score_for_context(text: str, base_score: float) -> float:
-    if not text or base_score == 0: return base_score
+    if not text or base_score == 0:
+        return base_score
     norm = text.lower()
 
     neutral_phrases = ["重申", "符合預期", "預期內", "中性看待", "無重大影響", "持平", "未變"]
@@ -244,7 +211,7 @@ def groq_analyze(news_list, target, avg_score, divergence_note=None):
 
 請用以下格式：
 隔日{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
-原因：{{一句 55 字內，只描述新聞與情緒方向}}
+原因：{{一句 55 字內}}
 {divergence_text}
 
 整體平均情緒分數：{avg_score:+.2f}
@@ -289,11 +256,17 @@ def analyze_target(db, collection, target, result_field):
     filtered = []
     seen_news = set()
 
+    # 公司 alias
+    company_alias = {
+        "台積電": ["台積電", "tsmc", "2330"],
+        "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
+        "聯電": ["聯電", "umc", "2303"],
+    }[target]
+
     for d in db.collection(collection).stream():
         dt = parse_docid_time(d.id)
         delta_days = (today - dt.date()).days
 
-        # ⭐ 今天新聞必抓！
         if delta_days < 0:
             delta_days = 0
 
@@ -308,6 +281,12 @@ def analyze_target(db, collection, target, result_field):
                 continue
 
             title, content = v.get("title", ""), v.get("content", "")
+
+            # ---------- ⛔ 新增規則：標題命中但內文沒命中 → skip ----------
+            title_hit = any(a in title for a in company_alias)
+            content_hit = any(a in content for a in company_alias)
+            if title_hit and not content_hit:
+                continue
 
             full_raw = f"{title}|{content}"
             if full_raw in seen_news:
@@ -346,6 +325,7 @@ def analyze_target(db, collection, target, result_field):
 
         news_with_scores = [(f"{t} 股價變動：{pc}", res.score * weight) for _, _, t, res, weight, pc in top_news]
         avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
+
         divergence_note = detect_divergence(avg_score, top_news)
         summary = groq_analyze(news_with_scores, target, avg_score, divergence_note)
 
