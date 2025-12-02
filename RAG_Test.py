@@ -118,25 +118,61 @@ def compile_tokens(tokens: List[Token]):
 
 # ---------- Scoring ----------
 def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
-    norm = normalize(text)
-    score, hits, seen = 0.0, [], set()
+    """
+    新版判斷邏輯：
+    - 以公司別名字串命中為主（標題或內容任一處出現任一別名），才視為相關新聞
+    - 僅抽出包含該公司名稱的句子（分句後）進行 token scoring，避免多家公司互相汙染
+    - 若新聞有提及公司但沒有任何 token 命中，仍回傳一個佔位 hit (weight=0) 以避免被上層直接跳過
+      （此佔位不會影響分數，但可讓原有流程繼續處理該新聞）
+    """
+    if not text or not target:
+        return MatchResult(0.0, [])
+
     aliases = {
         "台積電": ["台積電", "tsmc", "2330"],
         "鴻海": ["鴻海", "foxconn", "2317", "富士康"],
         "聯電": ["聯電", "umc", "2303"],
     }
-    company_pattern = "|".join(re.escape(a) for a in aliases.get(target, []))
-    if not re.search(company_pattern, norm):
+
+    alias_list = aliases.get(target, [])
+    if not alias_list:
         return MatchResult(0.0, [])
+
+    # 分句（保留中文與英文標點作為斷句依據）
+    sentences = re.split(r'(?<=[。\.！？!?])\s*', text)
+
+    # 抽取包含公司別名的句子（大小寫不敏感）
+    target_sentences = []
+    for s in sentences:
+        s_lower = (s or "").lower()
+        if any(a.lower() in s_lower for a in alias_list):
+            target_sentences.append(s.strip())
+
+    # 若沒有任何句子包含公司 -> 視為與該公司無關
+    if not target_sentences:
+        return MatchResult(0.0, [])
+
+    # 只在命中句子上做 token scoring（提高訊號純度）
+    joined = " ".join(target_sentences)
+    norm = normalize(joined)
+
+    score = 0.0
+    hits = []
+    seen = set()
 
     for ttype, cre, w, note, patt in pos_c + neg_c:
         key = (patt, note)
-        if key in seen: continue
-        matched = cre.search(norm) if ttype == "regex" else patt in norm
+        if key in seen:
+            continue
+        matched = cre.search(norm) if ttype == "regex" else (patt in norm)
         if matched:
             score += w
             hits.append((patt, w, note))
             seen.add(key)
+
+    # 若公司有被提到但沒有任何 token 命中 -> 加入佔位 hit，避免上層以 hits 為空判斷為無關新聞
+    if not hits:
+        hits.append(("<<COMPANY_ONLY>>", 0.0, "company_mentioned_but_no_token_hits"))
 
     return MatchResult(score, hits)
 
