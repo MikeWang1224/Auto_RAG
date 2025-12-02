@@ -270,7 +270,7 @@ def analyze_target(db, collection, target, result_field):
         if delta_days < 0:
             delta_days = 0
 
-        if delta_days > 2:
+        if delta_days > 1:
             continue
 
         day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
